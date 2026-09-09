@@ -44,6 +44,7 @@ def main():
     app.add_handler(CommandHandler("checkredeem", admin.checkredeem_cmd))
     app.add_handler(CommandHandler("admincid", admin.admincid_cmd))
     app.add_handler(CommandHandler("refrescarproductos", admin.refresh_products_cmd))
+    app.add_handler(CommandHandler("catalogo", admin.catalogo_cmd))
     app.add_handler(CommandHandler("precio", admin.set_price_cmd))
     app.add_handler(CommandHandler("preciocid", admin.set_cid_price_cmd))
     app.add_handler(CommandHandler("clientes", admin.clientes_cmd))
