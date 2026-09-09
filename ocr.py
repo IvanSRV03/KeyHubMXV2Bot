@@ -5,6 +5,11 @@ from typing import Optional
 from PIL import Image
 import pytesseract
 
+
+class OcrUnavailable(Exception):
+    """El binario de tesseract-ocr no está instalado/disponible en el servidor."""
+
+
 # Un Installation ID de Office/Windows normalmente son 7-9 grupos de 6-7 dígitos.
 # Aquí no asumimos un formato exacto: juntamos todos los dígitos que OCR detecte
 # línea por línea (para no mezclar renglones de la interfaz que no son el ID)
@@ -17,7 +22,12 @@ def extract_installation_id(image_bytes: bytes) -> Optional[str]:
     except Exception:
         return None
 
-    text = pytesseract.image_to_string(image)
+    try:
+        text = pytesseract.image_to_string(image)
+    except pytesseract.TesseractNotFoundError as e:
+        raise OcrUnavailable(str(e))
+    except Exception:
+        return None
 
     candidate_lines = []
     for line in text.splitlines():
