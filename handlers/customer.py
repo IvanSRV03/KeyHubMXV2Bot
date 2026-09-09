@@ -1,4 +1,5 @@
 import json
+import logging
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -181,10 +182,24 @@ async def generic_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
     context.user_data["awaiting_iid"] = False
 
-    photo = update.message.photo[-1]
-    file = await photo.get_file()
-    image_bytes = await file.download_as_bytearray()
-    iid = ocr.extract_installation_id(bytes(image_bytes))
+    try:
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+        image_bytes = await file.download_as_bytearray()
+        iid = ocr.extract_installation_id(bytes(image_bytes))
+    except ocr.OcrUnavailable:
+        await update.message.reply_text(
+            "⚠️ Todavía no puedo leer fotos en este servidor (falta configurar el lector de texto).\n"
+            "Por favor escribe tu Installation ID directamente, así: /cid 123456-123456-123456-..."
+        )
+        return
+    except Exception as e:
+        logging.exception("Error procesando la foto del Installation ID")
+        await update.message.reply_text(
+            f"❌ Hubo un problema leyendo la foto ({e}).\n"
+            "Por favor escribe tu Installation ID directamente, así: /cid 123456-123456-123456-..."
+        )
+        return
 
     if not iid:
         await update.message.reply_text(
