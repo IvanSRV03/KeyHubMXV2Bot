@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -215,7 +216,17 @@ async def generic_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def _process_cid(update: Update, context: ContextTypes.DEFAULT_TYPE, iid: str, already_announced=False):
     user = update.effective_user
-    iid_clean = iid.strip()
+    # El proveedor cuenta caracteres literales (debe ser exactamente 54 o 63),
+    # así que le mandamos solo los dígitos, sin guiones ni espacios que el
+    # usuario o el OCR hayan puesto para que se vea legible.
+    iid_clean = re.sub(r"\D", "", iid)
+
+    if len(iid_clean) not in (54, 63):
+        await update.message.reply_text(
+            f"⚠️ Ese Installation ID tiene {len(iid_clean)} dígitos, pero debe tener exactamente "
+            f"54 o 63. Revísalo y vuelve a mandarlo con /cid NUMERO (puedes escribirlo con o sin guiones)."
+        )
+        return
 
     if not already_announced:
         await update.message.reply_text("⏳ Consultando tu Confirmation ID...")
