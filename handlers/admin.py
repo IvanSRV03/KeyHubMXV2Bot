@@ -135,6 +135,40 @@ async def refresh_products_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
+async def catalogo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista TODOS los productos guardados (tengan precio de venta o no), para que el admin decida precios."""
+    if not await _guard(update):
+        return
+    rows = db.list_products()
+    if not rows:
+        await update.message.reply_text("No hay productos guardados. Corre /refrescarproductos primero.")
+        return
+
+    by_cat = {}
+    for r in rows:
+        by_cat.setdefault(r["category"] or "Otros", []).append(r)
+
+    chunks = []
+    current = ""
+    for cat, items in by_cat.items():
+        block = f"\n📁 {cat}\n"
+        for it in items:
+            precio = f"${it['price']:.2f}" if it["price"] is not None else "sin precio"
+            costo = f"${it['cost']:.2f}" if it["cost"] is not None else "?"
+            block += f"  {it['code']} — {it['name']} (costo prov.: {costo}, venta: {precio})\n"
+        if len(current) + len(block) > 3500:
+            chunks.append(current)
+            current = block
+        else:
+            current += block
+    if current:
+        chunks.append(current)
+
+    for i, c in enumerate(chunks):
+        header = f"Catálogo ({i + 1}/{len(chunks)}):\n" if len(chunks) > 1 else "Catálogo:\n"
+        await update.message.reply_text(header + c)
+
+
 async def set_price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _guard(update):
         return
