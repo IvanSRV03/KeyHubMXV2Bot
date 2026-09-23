@@ -1,5 +1,6 @@
 import logging
 
+from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -17,6 +18,46 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+# Lo que ve el cliente al tocar el botón de menú en Telegram. Se deja corto
+# a propósito: entre menos opciones, menos dudas.
+COMANDOS_CLIENTE = [
+    BotCommand("productos", "Ver el catálogo y comprar"),
+    BotCommand("cid", "Sacar mi Confirmation ID"),
+    BotCommand("saldo", "Ver cuánto debo"),
+    BotCommand("reposicion", "Una clave no me sirvió"),
+    BotCommand("historial", "Mis últimos movimientos"),
+]
+
+COMANDOS_ADMIN = COMANDOS_CLIENTE + [
+    BotCommand("pendientes", "Solicitudes de acceso"),
+    BotCommand("reposiciones", "Reposiciones por resolver"),
+    BotCommand("clientes", "Quién me debe"),
+    BotCommand("pagar", "Registrar un pago"),
+    BotCommand("cobrar", "Cargo manual"),
+    BotCommand("catalogo", "Catálogo con costos"),
+    BotCommand("ordenes", "Compras sin confirmar"),
+    BotCommand("help", "Todos mis comandos"),
+]
+
+
+async def _publicar_menu(app):
+    """Registra el menú de comandos que Telegram le muestra a cada quien.
+
+    Así el cliente no tiene que aprenderse nada: toca el botón de menú y ve
+    lo que puede hacer.
+    """
+    try:
+        await app.bot.set_my_commands(COMANDOS_CLIENTE, scope=BotCommandScopeDefault())
+        for admin_id in config.ADMIN_IDS:
+            await app.bot.set_my_commands(
+                COMANDOS_ADMIN, scope=BotCommandScopeChat(chat_id=admin_id)
+            )
+        logger.info("Menú de comandos publicado")
+    except Exception:
+        # Que falle el menú no debe impedir que el bot arranque.
+        logger.warning("No se pudo publicar el menú de comandos", exc_info=True)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -48,7 +89,7 @@ def main():
 
     db.init_db()
 
-    app = ApplicationBuilder().token(config.BOT_TOKEN).build()
+    app = ApplicationBuilder().token(config.BOT_TOKEN).post_init(_publicar_menu).build()
 
     # Comandos generales / clientes
     app.add_handler(CommandHandler("start", customer.start_cmd))
