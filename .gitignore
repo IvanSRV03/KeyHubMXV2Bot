@@ -1,0 +1,19 @@
+# Secretos — nunca subir
+.env
+*.env
+!.env.example
+
+# Base de datos local
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# macOS
+.DS_Store
+.Rhistory

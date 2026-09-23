@@ -12,6 +12,19 @@ Bot en Python que conecta con la API del proveedor **mspidpro** para:
 
 ---
 
+## ⚠️ Antes que nada: nunca subas tokens a este repo
+
+Los tokens (`BOT_TOKEN`, `PROVIDER_TOKEN`) van **solo** en variables de entorno:
+en Railway bajo *Variables*, y en tu computadora en un archivo `.env` local que
+ya está ignorado por `.gitignore`. Usa `.env.example` como plantilla.
+
+Si alguna vez un token llega a quedar escrito en un archivo del repo, **rótalo**
+(genéralo de nuevo en el panel del proveedor o con @BotFather). Borrarlo del
+archivo no basta: el valor viejo sigue guardado en el historial de git y
+cualquiera puede leerlo.
+
+---
+
 ## 1. Crea tu bot de Telegram
 
 1. Abre Telegram y busca **@BotFather**.
@@ -31,7 +44,7 @@ Bot en Python que conecta con la API del proveedor **mspidpro** para:
    repo de GitHub o usar `railway up` desde esta carpeta).
 2. En **Variables**, agrega:
    - `BOT_TOKEN` → el token de BotFather
-   - `PROVIDER_TOKEN` → `kt_5kWDPqBPBxSlZSzg1qmYUGA6mwOAi1OebM5cq93LhPE`
+   - `PROVIDER_TOKEN` → el token que te dio mspidpro (lo copias de tu panel; **nunca lo escribas en este README ni en el código**)
    - `ADMIN_IDS` → tu Telegram ID (y los de tu equipo si aplica)
    - `DB_PATH` → `/data/bot.db`
 3. **Importante — agrega un Volume:** en Railway, ve a tu servicio →
