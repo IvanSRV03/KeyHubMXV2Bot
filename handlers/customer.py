@@ -19,7 +19,7 @@ WELCOME = (
     "O más rápido todavía: manda el número del producto, por ejemplo /1\n\n"
     "Lo demás:\n"
     "/cid — sacar tu Confirmation ID\n"
-    "/saldo — cuánto debes\n"
+    "/saldo — cuánto debes y cómo pagar\n"
     "/reposicion — si una clave no te sirvió\n"
 )
 
@@ -97,10 +97,90 @@ async def saldo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c = db.get_customer(user.id)
     limite = db.effective_credit_limit(c)
     disponible = max(limite - c["balance"], 0)
-    await update.message.reply_text(
+
+    texto = (
         f"💰 Tu saldo pendiente es: ${c['balance']:.2f}\n"
         f"🧾 Límite de crédito: ${limite:.2f} (disponible: ${disponible:.2f})"
     )
+
+    if c["balance"] <= 0:
+        await update.message.reply_text(texto + "\n\n✅ Estás al corriente.")
+        return
+
+    await update.message.reply_text(
+        f"{texto}\n\nPara liquidar:\n{db.datos_pago()}",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📤 Ya te transferí", callback_data="comp:enviar")]]
+        ),
+    )
+
+
+async def comprobante_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """El cliente avisa que ya pagó y manda la foto del comprobante."""
+    customer = await require_approved(update, context)
+    if not customer:
+        return
+    context.user_data["awaiting_comprobante"] = True
+    await update.message.reply_text(
+        "Mándame la foto del comprobante de la transferencia.\n"
+        "En cuanto la revise el administrador, se te descuenta del saldo."
+    )
+
+
+async def comprobante_enviar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Botón «Ya te transferí» de /saldo."""
+    query = update.callback_query
+    await query.answer()
+    if not await require_approved(update, context):
+        return
+    context.user_data["awaiting_comprobante"] = True
+    await query.edit_message_text(
+        "Mándame la foto del comprobante de la transferencia.\n"
+        "En cuanto la revise el administrador, se te descuenta del saldo."
+    )
+
+
+async def _recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Guarda el comprobante y se lo manda al admin con botones."""
+    context.user_data.pop("awaiting_comprobante", None)
+    user = update.effective_user
+    c = db.get_customer(user.id)
+    saldo = c["balance"] if c else 0.0
+
+    file_id = update.message.photo[-1].file_id
+    comp_id = db.crear_comprobante(user.id, file_id, saldo)
+
+    await update.message.reply_text(
+        "✅ Recibí tu comprobante. En cuanto lo revise el administrador se "
+        "te descuenta del saldo y te aviso."
+    )
+
+    etiqueta = f"@{user.username}" if user.username else (user.first_name or user.id)
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_photo(
+                admin_id,
+                file_id,
+                caption=(
+                    f"💸 Comprobante de pago #{comp_id}\n"
+                    f"Cliente: {etiqueta} (ID {user.id})\n"
+                    f"Saldo actual: ${saldo:.2f}"
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton(
+                            f"✅ Liquidó todo (${saldo:.2f})",
+                            callback_data=f"comp:{comp_id}:todo",
+                        )],
+                        [
+                            InlineKeyboardButton("✏️ Otro monto", callback_data=f"comp:{comp_id}:otro"),
+                            InlineKeyboardButton("❌ Rechazar", callback_data=f"comp:{comp_id}:no"),
+                        ],
+                    ]
+                ),
+            )
+        except Exception:
+            logger.warning("No se pudo mandar el comprobante al admin %s", admin_id, exc_info=True)
 
 
 async def historial_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -432,6 +512,14 @@ async def generic_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
     customer = await require_approved(update, context)
     if not customer:
         return
+
+    # Una foto puede ser dos cosas muy distintas: el comprobante de una
+    # transferencia o la pantalla con el Installation ID. Se distingue por
+    # lo que el cliente pidió justo antes.
+    if context.user_data.get("awaiting_comprobante"):
+        await _recibir_comprobante(update, context)
+        return
+
     context.user_data.pop("awaiting_iid", None)
 
     aviso = await update.message.reply_text("🔍 Leyendo la foto...")

@@ -815,6 +815,10 @@ async def monto_texto_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     Devuelve True si consumió el mensaje, para que el manejador de texto
     libre no lo trate como otra cosa.
     """
+    comp_id = context.user_data.get("comprobante_pendiente")
+    if comp_id is not None:
+        return await _monto_de_comprobante(update, context, comp_id)
+
     es_pago = "pago_pendiente_de" in context.user_data
     es_cobro = "cobro_pendiente_de" in context.user_data
     if not (es_pago or es_cobro):
@@ -1017,3 +1021,175 @@ async def numero_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(f"✅ «{nombre}» ahora es el /{n}{aviso}{vendible}")
+
+
+# --------------------------------------------------------------------------
+# Comprobantes de transferencia
+# --------------------------------------------------------------------------
+
+async def _editar_aviso(query, texto):
+    """El aviso del comprobante es una FOTO, así que se edita su pie."""
+    try:
+        await query.edit_message_caption(caption=texto)
+    except Exception:
+        # Si no era foto (por ejemplo desde /comprobantes), se edita normal.
+        try:
+            await query.edit_message_text(texto)
+        except Exception:
+            pass
+
+
+async def _aplicar_pago_comprobante(context, comp, monto: float) -> str:
+    """Registra el pago, marca el comprobante y le avisa al cliente."""
+    tid = comp["telegram_id"]
+    if not db.add_payment(tid, monto, note=f"transferencia, comprobante #{comp['id']}"):
+        return "❌ Ese cliente ya no existe."
+
+    db.resolver_comprobante(comp["id"], db.COMP_APROBADO, monto=monto)
+    c = db.get_customer(tid)
+    nombre = c["username"] or c["first_name"] or tid
+
+    await _avisar_cliente(
+        context,
+        tid,
+        f"✅ Confirmé tu pago de ${monto:.2f}.\n"
+        f"Tu saldo ahora es ${c['balance']:.2f}."
+        + ("\n\n¡Estás al corriente! 🎉" if c["balance"] <= 0 else ""),
+    )
+    return (
+        f"✅ Comprobante #{comp['id']} aprobado.\n"
+        f"Pago de ${monto:.2f} registrado.\n"
+        f"@{nombre} ahora debe ${c['balance']:.2f}"
+    )
+
+
+async def comprobante_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Aprobar, ajustar o rechazar un comprobante desde los botones del aviso."""
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(update.effective_user.id):
+        await query.answer("⛔ Solo para administradores.", show_alert=True)
+        return
+
+    _, comp_id, accion = query.data.split(":")
+    comp = db.get_comprobante(int(comp_id))
+    if not comp:
+        await _editar_aviso(query, "No encontré ese comprobante.")
+        return
+    if comp["status"] != db.COMP_ENVIADO:
+        await _editar_aviso(
+            query, f"Ese comprobante ya estaba {comp['status']} (${comp['monto_aplicado'] or 0:.2f})."
+        )
+        return
+
+    if accion == "no":
+        db.resolver_comprobante(comp["id"], db.COMP_RECHAZADO)
+        await _editar_aviso(query, f"❌ Comprobante #{comp['id']} rechazado.")
+        await _avisar_cliente(
+            context,
+            comp["telegram_id"],
+            "No pude confirmar tu comprobante de pago. Escríbele al administrador "
+            "para aclararlo.",
+        )
+        return
+
+    if accion == "otro":
+        context.user_data["comprobante_pendiente"] = comp["id"]
+        await _editar_aviso(
+            query,
+            f"Comprobante #{comp['id']} — ¿de cuánto fue la transferencia?\n"
+            "Mándame solo el número, por ejemplo 250.50",
+        )
+        return
+
+    # "todo": se liquida el saldo que tenía al mandar el comprobante.
+    c = db.get_customer(comp["telegram_id"])
+    monto = c["balance"] if c else comp["saldo_al_enviar"]
+    if monto <= 0:
+        db.resolver_comprobante(comp["id"], db.COMP_APROBADO, monto=0)
+        await _editar_aviso(query, "Ese cliente ya no debe nada. No se registró ningún pago.")
+        return
+
+    await _editar_aviso(query, await _aplicar_pago_comprobante(context, comp, monto))
+
+
+async def comprobantes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comprobantes que faltan por revisar."""
+    if not await _guard(update):
+        return
+    rows = db.list_comprobantes(status=db.COMP_ENVIADO)
+    if not rows:
+        await update.message.reply_text("No hay comprobantes pendientes. ✅")
+        return
+
+    for r in rows:
+        c = db.get_customer(r["telegram_id"])
+        quien = (c["username"] or c["first_name"]) if c else r["telegram_id"]
+        saldo = c["balance"] if c else r["saldo_al_enviar"]
+        try:
+            await update.message.reply_photo(
+                r["file_id"],
+                caption=(
+                    f"💸 Comprobante #{r['id']}\n"
+                    f"Cliente: @{quien} (ID {r['telegram_id']})\n"
+                    f"Saldo actual: ${saldo:.2f}\n"
+                    f"Enviado: {r['created_at'][:16]}"
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton(
+                            f"✅ Liquidó todo (${saldo:.2f})",
+                            callback_data=f"comp:{r['id']}:todo",
+                        )],
+                        [
+                            InlineKeyboardButton("✏️ Otro monto", callback_data=f"comp:{r['id']}:otro"),
+                            InlineKeyboardButton("❌ Rechazar", callback_data=f"comp:{r['id']}:no"),
+                        ],
+                    ]
+                ),
+            )
+        except Exception:
+            await update.message.reply_text(
+                f"💸 Comprobante #{r['id']} de @{quien} — no pude recuperar la foto."
+            )
+
+
+async def datos_bancarios_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Los datos que ve el cliente en /saldo para transferirte."""
+    if not await _guard(update):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Así los ven tus clientes en /saldo:\n\n"
+            f"{db.datos_pago()}\n\n"
+            "Para cambiarlos:\n"
+            "/datosbancarios BBVA — Tu Nombre / CLABE: 0121800... / Cuenta: 159..."
+        )
+        return
+
+    nuevos = " ".join(context.args).replace(" / ", "\n")
+    db.set_setting("datos_pago", nuevos)
+    await update.message.reply_text(f"Datos actualizados. Tus clientes verán:\n\n{nuevos}")
+
+
+async def _monto_de_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE, comp_id: int) -> bool:
+    """El admin escribió el monto de una transferencia que no liquidaba todo."""
+    try:
+        monto = float(update.message.text.strip().replace("$", "").replace(",", ""))
+    except ValueError:
+        await update.message.reply_text("No le entendí. Mándame solo el número, por ejemplo 250.50")
+        return True
+
+    context.user_data.pop("comprobante_pendiente", None)
+    if monto <= 0:
+        await update.message.reply_text("El monto tiene que ser mayor a 0.")
+        return True
+
+    comp = db.get_comprobante(comp_id)
+    if not comp or comp["status"] != db.COMP_ENVIADO:
+        await update.message.reply_text("Ese comprobante ya se había resuelto.")
+        return True
+
+    await update.message.reply_text(await _aplicar_pago_comprobante(context, comp, monto))
+    return True

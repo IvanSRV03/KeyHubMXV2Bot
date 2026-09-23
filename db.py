@@ -20,6 +20,11 @@ REPO_SOLICITADA = "solicitada"
 REPO_APROBADA = "aprobada"
 REPO_RECHAZADA = "rechazada"
 
+# Estados de un comprobante de transferencia que manda el cliente.
+COMP_ENVIADO = "enviado"
+COMP_APROBADO = "aprobado"
+COMP_RECHAZADO = "rechazado"
+
 # Valores por defecto de los ajustes globales, usados cuando el admin todavia
 # no los configuro. Son conservadores a proposito: mas vale que el bot diga
 # "no" de mas y el admin lo suba, a que alguien compre de mas a tu costo.
@@ -100,7 +105,18 @@ def init_db():
                 created_at TEXT,
                 updated_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS comprobantes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER,
+                file_id TEXT,
+                saldo_al_enviar REAL,
+                status TEXT,
+                monto_aplicado REAL,
+                created_at TEXT,
+                updated_at TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_tx_customer ON transactions (telegram_id, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_comp_status ON comprobantes (status, id DESC);
             CREATE INDEX IF NOT EXISTS idx_orders_status ON orders (status, created_at DESC);
             """
         )
@@ -524,6 +540,58 @@ def compras_del_cliente(telegram_id: int, limit: int = 10):
                ORDER BY created_at DESC LIMIT ?""",
             (telegram_id, ORDEN_COMPLETADA, limit),
         ).fetchall()
+
+
+# --------------------------------------------------------------------------
+# Comprobantes de transferencia
+# --------------------------------------------------------------------------
+
+def crear_comprobante(telegram_id: int, file_id: str, saldo: float) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO comprobantes (telegram_id, file_id, saldo_al_enviar, status, created_at, updated_at)
+               VALUES (?,?,?,?,?,?)""",
+            (telegram_id, file_id, saldo, COMP_ENVIADO, _now(), _now()),
+        )
+        return cur.lastrowid
+
+
+def get_comprobante(comp_id: int):
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM comprobantes WHERE id=?", (comp_id,)).fetchone()
+
+
+def resolver_comprobante(comp_id: int, status: str, monto=None):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE comprobantes SET status=?, monto_aplicado=?, updated_at=? WHERE id=?",
+            (status, monto, _now(), comp_id),
+        )
+
+
+def list_comprobantes(status: str = None, limit: int = 20):
+    with get_conn() as conn:
+        if status:
+            return conn.execute(
+                "SELECT * FROM comprobantes WHERE status=? ORDER BY id DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        return conn.execute(
+            "SELECT * FROM comprobantes ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+
+# Datos para que el cliente transfiera. Se guardan como ajuste (no en el
+# codigo) para poder cambiarlos con /datosbancarios sin volver a desplegar.
+DATOS_PAGO_DEFAULT = (
+    "🏦 BBVA — José Iván Sandoval\n"
+    "CLABE: 012180015972489513\n"
+    "Cuenta: 1597248951"
+)
+
+
+def datos_pago() -> str:
+    return get_setting("datos_pago", DATOS_PAGO_DEFAULT)
 
 
 # --------------------------------------------------------------------------

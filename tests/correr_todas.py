@@ -14,6 +14,7 @@ PRUEBAS = [
     "test_compra.py",
     "test_practicidad.py",
     "test_cid.py",
+    "test_pagos.py",
     "test_arranque.py",
     "test_concurrencia.py",
 ]

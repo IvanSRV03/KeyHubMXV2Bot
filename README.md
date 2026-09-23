@@ -147,6 +147,31 @@ a la mano: `/nombre 1 Office 2016` hace lo mismo que `/nombre OFF2016 Office 201
 - `/comprarstock CODIGO CANTIDAD` — compra al proveedor sin cargarlo a ningún cliente (para tener inventario propio)
 - `/clientes` — lista de todos los clientes con su saldo
 - `/cliente TELEGRAM_ID` — detalle y últimos movimientos de un cliente
+### Comprobantes de transferencia
+
+Cuando un cliente manda `/saldo` y debe algo, el bot le muestra cuánto debe,
+**tus datos para transferir** y un botón «📤 Ya te transferí». Al tocarlo,
+manda la foto del comprobante y a ti te llega con tres botones:
+
+- **✅ Liquidó todo** → borra su saldo completo
+- **✏️ Otro monto** → escribes el número y se abona eso nada más
+- **❌ Rechazar** → no mueve nada y se le avisa
+
+El saldo **solo** se mueve cuando tú tocas el botón: mandar el comprobante no
+descuenta nada por sí solo. Un comprobante ya resuelto no se puede volver a
+aplicar, y un cliente no puede aprobarse el suyo.
+
+Con `/comprobantes` ves los que faltan por revisar, con su foto.
+
+Tus datos bancarios se cambian sin volver a desplegar:
+
+```
+/datosbancarios BBVA — Tu Nombre / CLABE: 0121800... / Cuenta: 159...
+```
+
+(las diagonales `/` se convierten en saltos de línea). Sin argumentos te
+muestra cómo los están viendo tus clientes.
+
 ### Cobrar y registrar pagos (sin escribir IDs)
 
 - `/pagar` — a secas. El bot te muestra quién te debe, con botones. Tocas al

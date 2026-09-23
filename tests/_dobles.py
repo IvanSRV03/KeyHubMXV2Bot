@@ -23,6 +23,13 @@ class FakeMessage:
         self.teclados.append(reply_markup)
         return self
 
+    async def reply_photo(self, file_id, caption="", reply_markup=None, **kw):
+        self.respuestas.append(caption)
+        self.teclados.append(reply_markup)
+        self.fotos_enviadas = getattr(self, "fotos_enviadas", [])
+        self.fotos_enviadas.append(file_id)
+        return self
+
     def botones(self):
         """Todos los callback_data de los botones que se enviaron."""
         datos = []
@@ -48,6 +55,12 @@ class FakeQuery:
 
     async def edit_message_text(self, texto, reply_markup=None, **kw):
         self.ediciones.append(texto)
+        if reply_markup is not None:
+            self.message.teclados.append(reply_markup)
+
+    async def edit_message_caption(self, caption, reply_markup=None, **kw):
+        """El aviso de un comprobante es una foto: se edita su pie."""
+        self.ediciones.append(caption)
         if reply_markup is not None:
             self.message.teclados.append(reply_markup)
 
@@ -78,6 +91,11 @@ class FakeBot:
 
     async def send_message(self, chat_id, text, reply_markup=None, **kw):
         self.enviados.append((chat_id, text, reply_markup))
+
+    async def send_photo(self, chat_id, file_id, caption="", reply_markup=None, **kw):
+        self.enviados.append((chat_id, caption, reply_markup))
+        self.fotos = getattr(self, "fotos", [])
+        self.fotos.append((chat_id, file_id))
 
     def textos_a(self, chat_id):
         return [t for cid, t, _ in self.enviados if cid == chat_id]

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 COMANDOS_CLIENTE = [
     BotCommand("productos", "Ver el catálogo y comprar"),
     BotCommand("cid", "Sacar mi Confirmation ID"),
-    BotCommand("saldo", "Ver cuánto debo"),
+    BotCommand("saldo", "Ver cuánto debo y cómo pagar"),
     BotCommand("reposicion", "Una clave no me sirvió"),
     BotCommand("historial", "Mis últimos movimientos"),
 ]
@@ -34,6 +34,7 @@ COMANDOS_ADMIN = COMANDOS_CLIENTE + [
     BotCommand("pendientes", "Solicitudes de acceso"),
     BotCommand("reposiciones", "Reposiciones por resolver"),
     BotCommand("clientes", "Quién me debe"),
+    BotCommand("comprobantes", "Comprobantes por revisar"),
     BotCommand("pagar", "Registrar un pago"),
     BotCommand("cobrar", "Cargo manual"),
     BotCommand("catalogo", "Catálogo con costos"),
@@ -133,6 +134,11 @@ def main():
     app.add_handler(CommandHandler("reposicion", customer.reposicion_cmd))
     app.add_handler(CommandHandler("reposiciones", admin.reposiciones_cmd))
 
+    # Comprobantes de transferencia
+    app.add_handler(CommandHandler("comprobante", customer.comprobante_cmd))
+    app.add_handler(CommandHandler("comprobantes", admin.comprobantes_cmd))
+    app.add_handler(CommandHandler("datosbancarios", admin.datos_bancarios_cmd))
+
     # Botones inline
     app.add_handler(CallbackQueryHandler(customer.buy_confirm_callback, pattern=r"^buy:"))
     app.add_handler(CallbackQueryHandler(customer.pick_callback, pattern=r"^pick:"))
@@ -141,6 +147,8 @@ def main():
     app.add_handler(CallbackQueryHandler(admin.pagar_callback, pattern=r"^pay:"))
     app.add_handler(CallbackQueryHandler(admin.cobrar_callback, pattern=r"^chg:"))
     app.add_handler(CallbackQueryHandler(customer.cid_confirm_callback, pattern=r"^cid:"))
+    app.add_handler(CallbackQueryHandler(customer.comprobante_enviar_callback, pattern=r"^comp:enviar$"))
+    app.add_handler(CallbackQueryHandler(admin.comprobante_callback, pattern=r"^comp:\d+:"))
 
     # Atajos numericos: el cliente manda /1, /2, ... para comprar directo.
     # Va como MessageHandler porque los numeros de producto son dinamicos.
