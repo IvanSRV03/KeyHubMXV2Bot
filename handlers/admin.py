@@ -157,7 +157,12 @@ async def catalogo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             precio = f"${it['price']:.2f}" if it["price"] is not None else "sin precio"
             costo = f"${it['cost']:.2f}" if it["cost"] is not None else "?"
             atajo = f"/{it['shortcut']} " if it["shortcut"] else "    "
-            block += f"  {atajo}{it['code']} — {it['name']} (costo prov.: {costo}, venta: {precio})\n"
+            nombre = db.nombre_visible(it)
+            renombrado = " ✏️" if it["display_name"] else ""
+            block += (
+                f"  {atajo}{it['code']} — {nombre}{renombrado} "
+                f"(costo prov.: {costo}, venta: {precio})\n"
+            )
         if len(current) + len(block) > 3500:
             chunks.append(current)
             current = block
@@ -859,3 +864,59 @@ async def cobrar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"@{nombre} debe ${c['balance']:.2f}\n"
         "¿Cuánto le vas a cobrar? Mándame solo el número."
     )
+
+
+async def ocultar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Saca un producto del catálogo de los clientes, sin borrarlo."""
+    if not await _guard(update):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Uso: /ocultar CODIGO\n"
+            "Lo quita de /productos. Para volver a venderlo, solo ponle precio otra vez "
+            "con /precio y recupera el mismo número."
+        )
+        return
+
+    code = context.args[0]
+    producto = db.get_product(code)
+    if not producto:
+        await update.message.reply_text("Ese código no existe. Revísalo con /catalogo.")
+        return
+    if not db.ocultar_producto(code):
+        await update.message.reply_text(f"{code} ya estaba oculto (no tenía precio).")
+        return
+    await update.message.reply_text(
+        f"🚫 {db.nombre_visible(producto)} ya no aparece en /productos.\n"
+        f"Su número (/{producto['shortcut']}) queda reservado por si lo revives."
+    )
+
+
+async def nombre_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cambia el nombre que ve el cliente, sin tocar el del proveedor."""
+    if not await _guard(update):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Uso: /nombre CODIGO El nombre que quieras\n"
+            "     /nombre CODIGO original   → regresa al nombre del proveedor\n\n"
+            "Sirve para que tus clientes vean \"Windows 11 Pro\" en vez de "
+            "\"Win10/11 Pro OEM 1PC 97% (Warranty: 30 day)\".\n"
+            "El nombre que pongas aquí no se pierde al correr /refrescarproductos."
+        )
+        return
+
+    code = context.args[0]
+    producto = db.get_product(code)
+    if not producto:
+        await update.message.reply_text("Ese código no existe. Revísalo con /catalogo.")
+        return
+
+    resto = " ".join(context.args[1:]).strip()
+    if resto.lower() in ("original", "proveedor", "reset"):
+        db.set_display_name(code, None)
+        await update.message.reply_text(f"{code} vuelve a llamarse «{producto['name']}»")
+        return
+
+    db.set_display_name(code, resto)
+    await update.message.reply_text(f"{code} ahora se le muestra al cliente como «{resto}»")

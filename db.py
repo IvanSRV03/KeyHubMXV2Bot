@@ -128,6 +128,40 @@ def _migrate(conn):
         # productos con precio de venta, que son los que el cliente ve.
         conn.execute("ALTER TABLE products ADD COLUMN shortcut INTEGER")
 
+    if "display_name" not in pcols:
+        # Nombre que ve el cliente. Los del proveedor vienen con cosas como
+        # "Win10/11 Pro OEM 1PC 97% (Warranty: 30 day)", que no le dicen nada
+        # a un cliente. Este campo sobrevive a /refrescarproductos.
+        conn.execute("ALTER TABLE products ADD COLUMN display_name TEXT")
+
+    _asignar_atajos_faltantes(conn)
+
+
+def _asignar_atajos_faltantes(conn):
+    """Le pone numero corto a todo producto con precio que no tenga uno.
+
+    Corre en cada arranque, no solo al crear la columna: los productos a los
+    que ya les habias puesto precio antes de que existieran los atajos se
+    quedaban sin numero y aparecian como "/None" en el catalogo.
+    """
+    sin_numero = conn.execute(
+        "SELECT code FROM products WHERE price IS NOT NULL AND shortcut IS NULL"
+        " ORDER BY category, name"
+    ).fetchall()
+    if not sin_numero:
+        return
+
+    usados = {
+        r["shortcut"]
+        for r in conn.execute("SELECT shortcut FROM products WHERE shortcut IS NOT NULL")
+    }
+    n = 1
+    for row in sin_numero:
+        while n in usados:
+            n += 1
+        conn.execute("UPDATE products SET shortcut=? WHERE code=?", (n, row["code"]))
+        usados.add(n)
+
 
 # --------------------------------------------------------------------------
 # Clientes
@@ -276,6 +310,31 @@ def set_product_price(code: str, price: float) -> int:
             n += 1
         conn.execute("UPDATE products SET shortcut=? WHERE code=?", (n, code))
         return n
+
+
+def set_display_name(code: str, nombre) -> bool:
+    """Cambia el nombre que ve el cliente. None regresa al del proveedor."""
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE products SET display_name=? WHERE code=?", (nombre, code))
+        return cur.rowcount > 0
+
+
+def ocultar_producto(code: str) -> bool:
+    """Lo saca del catalogo del cliente sin borrarlo.
+
+    Se le conserva el numero corto: si mas adelante le vuelves a poner
+    precio, recupera el mismo /N que ya conocian tus clientes.
+    """
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE products SET price=NULL WHERE code=? AND price IS NOT NULL", (code,)
+        )
+        return cur.rowcount > 0
+
+
+def nombre_visible(row) -> str:
+    """El nombre que se le muestra al cliente."""
+    return row["display_name"] or row["name"]
 
 
 def get_product_by_shortcut(n: int):

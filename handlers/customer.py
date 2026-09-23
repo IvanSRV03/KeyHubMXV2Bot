@@ -135,8 +135,9 @@ async def productos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fila = []
     for r in rows:
         n = r["shortcut"]
-        lines.append(f"/{n} — {r['name']} — ${r['price']:.2f}")
-        fila.append(InlineKeyboardButton(f"{n}. {r['name']}", callback_data=f"pick:{n}"))
+        nombre = db.nombre_visible(r)
+        lines.append(f"/{n} — {nombre} — ${r['price']:.2f}")
+        fila.append(InlineKeyboardButton(f"{n}. {nombre}"[:60], callback_data=f"pick:{n}"))
         if len(fila) == 2:
             botones.append(fila)
             fila = []
@@ -212,7 +213,7 @@ async def _pedir_confirmacion(message, customer, product, qty: int):
 
     cantidad = f"\nCantidad: {qty}" if qty > 1 else ""
     await message.reply_text(
-        f"📦 {product['name']} — ${product['price']:.2f}{cantidad}\n"
+        f"📦 {db.nombre_visible(product)} — ${product['price']:.2f}{cantidad}\n"
         f"Total: ${total:.2f}\n"
         f"Tu saldo quedaría en ${customer['balance'] + total:.2f}",
         reply_markup=InlineKeyboardMarkup(

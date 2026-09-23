@@ -127,7 +127,13 @@ Para que no estés a ciegas, te llega un mensaje cuando:
 - `/checkredeem CLAVE1 CLAVE2 ...` — revisa si ya fueron canjeadas
 - `/admincid INSTALLATION_ID` — saca un CID sin cargárselo a ningún cliente
 - `/refrescarproductos` — actualiza el catálogo desde el proveedor
-- `/precio CODIGO PRECIO` — fija el precio de venta de un producto
+- `/precio CODIGO PRECIO` — fija el precio de venta (y le asigna su `/1`, `/2`...)
+- `/nombre CODIGO Nombre bonito` — cambia el nombre que ve el cliente, para que
+  no lea "Win10/11 Pro OEM 1PC 97% (Warranty: 30 day)" sino "Windows 11 Pro".
+  Ese nombre **no se pierde** al correr `/refrescarproductos`.
+  Con `/nombre CODIGO original` regresa al del proveedor.
+- `/ocultar CODIGO` — lo saca de `/productos` sin borrarlo. Si luego le vuelves
+  a poner precio, recupera el mismo número que ya conocían tus clientes.
 - `/preciocid PRECIO` — fija lo que le cobras a un cliente por un CID
 - `/comprarstock CODIGO CANTIDAD` — compra al proveedor sin cargarlo a ningún cliente (para tener inventario propio)
 - `/clientes` — lista de todos los clientes con su saldo

@@ -82,4 +82,66 @@ assert all(len(p) <= 3800 for p in pedazos), "un pedazo pasa el límite de Teleg
 assert sum(p.count("linea ") for p in pedazos) == 300, "se perdieron líneas al fragmentar"
 print(f"OK un mensaje largo se parte en {len(pedazos)} pedazos sin perder líneas")
 
-print("\nTODO BIEN (base de datos)")
+# --------------------------------------------------------------------------
+# Caso real: productos que YA tenían precio antes de que existieran los
+# números cortos aparecían como "/None" en el catálogo.
+# --------------------------------------------------------------------------
+import sqlite3 as _sq  # noqa: E402
+
+conn = _sq.connect(DB)
+conn.execute("UPDATE products SET shortcut=NULL")
+conn.execute(
+    "INSERT OR REPLACE INTO products (code, name, category, cost, price, updated_at, shortcut)"
+    " VALUES ('WIN11PRO','Win10/11 Pro OEM 1PC 97%','Windows',5.0,50.0,'2025-09-01',NULL)"
+)
+conn.execute(
+    "INSERT OR REPLACE INTO products (code, name, category, cost, price, updated_at, shortcut)"
+    " VALUES ('OFF2019','Office2019 PP Phone','Office',8.0,50.0,'2025-09-01',NULL)"
+)
+conn.execute(
+    "INSERT OR REPLACE INTO products (code, name, category, cost, price, updated_at, shortcut)"
+    " VALUES ('SINPRECIO','Producto sin precio','Otros',3.0,NULL,'2025-09-01',NULL)"
+)
+conn.commit()
+conn.close()
+
+db.init_db()  # el arranque debe rellenar los números faltantes
+
+vendibles = db.list_products_a_la_venta()
+assert vendibles, "no quedó ningún producto vendible"
+sin_numero = [v["code"] for v in vendibles if v["shortcut"] is None]
+assert not sin_numero, f"quedaron productos sin número (saldrían como /None): {sin_numero}"
+numeros = [v["shortcut"] for v in vendibles]
+assert len(numeros) == len(set(numeros)), f"se repitieron números: {numeros}"
+assert db.get_product("SINPRECIO")["shortcut"] is None, "se numeró un producto sin precio"
+print(f"OK a los productos que ya tenían precio se les asigna número solos: {sorted(numeros)}")
+
+antes = {v["code"]: v["shortcut"] for v in db.list_products_a_la_venta()}
+db.init_db()
+despues = {v["code"]: v["shortcut"] for v in db.list_products_a_la_venta()}
+assert antes == despues, "los números cambiaron al reiniciar el bot"
+print("OK los números no cambian al reiniciar")
+
+# --- nombre visible y ocultar ---
+assert db.nombre_visible(db.get_product("WIN11PRO")) == "Win10/11 Pro OEM 1PC 97%"
+db.set_display_name("WIN11PRO", "Windows 11 Pro")
+assert db.nombre_visible(db.get_product("WIN11PRO")) == "Windows 11 Pro"
+
+# el nombre puesto por ti sobrevive a /refrescarproductos
+db.upsert_product("WIN11PRO", "Win10/11 Pro OEM 1PC 97% (Warranty: 30 day)", "Windows", 5.0)
+assert db.nombre_visible(db.get_product("WIN11PRO")) == "Windows 11 Pro", \
+    "el nombre personalizado se perdió al refrescar el catálogo"
+print("OK el nombre que le pongas sobrevive a /refrescarproductos")
+
+n_win = db.get_product("WIN11PRO")["shortcut"]
+assert db.ocultar_producto("WIN11PRO") is True
+assert db.get_product_by_shortcut(n_win) is None, "sigue comprable después de ocultarlo"
+assert db.ocultar_producto("WIN11PRO") is False, "ocultar dos veces debería avisar"
+assert db.set_product_price("WIN11PRO", 60.0) == n_win, "al revivirlo cambió de número"
+print(f"OK ocultar y revivir un producto conserva su número (/{n_win})")
+
+db.set_display_name("WIN11PRO", None)
+assert db.nombre_visible(db.get_product("WIN11PRO")).startswith("Win10/11"), "no regresó al nombre original"
+print("OK se puede regresar al nombre del proveedor")
+
+print("\nTODO BIEN (catálogo)")
