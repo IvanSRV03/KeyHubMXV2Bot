@@ -947,3 +947,73 @@ async def nombre_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db.set_display_name(code, resto)
     await update.message.reply_text(f"{code} ahora se le muestra al cliente como «{resto}»")
+
+
+async def numero_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Le cambia el número corto a un producto (/1, /2, ...).
+
+    Sirve para conservar la numeración que tus clientes ya se saben cuando
+    cambias de proveedor de un producto: si el /11 era una versión OEM y
+    ahora vendes la Retail, el /11 puede seguir siendo el mismo número.
+    """
+    if not await _guard(update):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Uso: /numero CODIGO NUMERO\n"
+            "Ejemplo: /numero 502 11  → el producto 502 pasa a ser el /11\n\n"
+            "Sirve para no cambiarles el número a tus clientes cuando cambias "
+            "de versión de un producto."
+        )
+        return
+
+    producto = _resolver_producto(context.args[0])
+    if not producto:
+        await update.message.reply_text(
+            "No encontré ese producto. Puedes usar su código o su número, y "
+            "ver los dos con /catalogo."
+        )
+        return
+
+    try:
+        n = int(context.args[1].lstrip("/"))
+    except ValueError:
+        await update.message.reply_text("El número debe ser un entero, por ejemplo 11.")
+        return
+    if n < 1:
+        await update.message.reply_text("El número debe ser 1 o más.")
+        return
+
+    resultado = db.set_shortcut(producto["code"], n)
+    if resultado is None:
+        await update.message.reply_text("No encontré ese producto.")
+        return
+
+    que_paso, otro_code = resultado
+    nombre = db.nombre_visible(db.get_product(producto["code"]))
+
+    if que_paso == "sin_cambio":
+        await update.message.reply_text(f"{nombre} ya era el /{n}.")
+        return
+
+    aviso = ""
+    if otro_code:
+        otro = db.get_product(otro_code)
+        if que_paso == "liberado":
+            aviso = (
+                f"\n\nEl /{n} lo tenía apartado «{db.nombre_visible(otro)}» ({otro_code}), "
+                f"que está oculto. Se quedó sin número; si lo revives con /precio "
+                f"le tocará otro."
+            )
+        else:
+            aviso = (
+                f"\n\nSe intercambió con «{db.nombre_visible(otro)}» ({otro_code}), "
+                f"que ahora es el /{otro['shortcut']}."
+            )
+
+    vendible = "" if producto["price"] is not None else (
+        f"\n\n⚠️ Ojo: {producto['code']} no tiene precio, así que todavía no aparece "
+        f"en /productos. Ponle uno con /precio {producto['code']} MONTO"
+    )
+
+    await update.message.reply_text(f"✅ «{nombre}» ahora es el /{n}{aviso}{vendible}")

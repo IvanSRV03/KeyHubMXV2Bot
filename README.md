@@ -136,6 +136,11 @@ a la mano: `/nombre 1 Office 2016` hace lo mismo que `/nombre OFF2016 Office 201
   no lea "Win10/11 Pro OEM 1PC 97% (Warranty: 30 day)" sino "Windows 11 Pro".
   Ese nombre **no se pierde** al correr `/refrescarproductos`.
   Con `/nombre CODIGO original` regresa al del proveedor.
+- `/numero CODIGO NUMERO` — le cambia el número corto. Sirve para no
+  cambiarles el número a tus clientes cuando cambias de versión de un
+  producto: si el `/11` era la versión OEM y ahora vendes la Retail,
+  `/numero 502 11` hace que el `/11` siga siendo el mismo número.
+  Si ese número lo tiene otro producto a la venta, se intercambian.
 - `/ocultar CODIGO` — lo saca de `/productos` sin borrarlo. Si luego le vuelves
   a poner precio, recupera el mismo número que ya conocían tus clientes.
 - `/preciocid PRECIO` — fija lo que le cobras a un cliente por un CID

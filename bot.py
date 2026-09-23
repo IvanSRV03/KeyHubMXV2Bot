@@ -110,6 +110,7 @@ def main():
     app.add_handler(CommandHandler("preciocid", admin.set_cid_price_cmd))
     app.add_handler(CommandHandler("ocultar", admin.ocultar_cmd))
     app.add_handler(CommandHandler("nombre", admin.nombre_cmd))
+    app.add_handler(CommandHandler("numero", admin.numero_cmd))
     app.add_handler(CommandHandler("clientes", admin.clientes_cmd))
     app.add_handler(CommandHandler("cliente", admin.cliente_cmd))
     app.add_handler(CommandHandler("cobrar", admin.cobrar_cmd))

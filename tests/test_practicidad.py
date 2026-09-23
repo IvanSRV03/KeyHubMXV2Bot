@@ -232,4 +232,70 @@ correr(admin.nombre_cmd(
 assert "No encontré" in msg.respuestas[-1] and "/catalogo" in msg.respuestas[-1]
 print("OK un número inexistente avisa y dice dónde buscar")
 
-print("\nTODO BIEN (catálogo por número)")
+# --------------------------------------------------------------------------
+# 7) Reasignar el número: el caso real de cambiar OEM por Retail
+#    /11 era el 505 (Home OEM), ya oculto. Se quiere que el /11 sea el 502.
+# --------------------------------------------------------------------------
+db.upsert_product("505", "Win10/11 Home OEM 1PC 95% (Warranty: 30 day)", "Windows", 0.50)
+db.upsert_product("502", "Win10/11 Pro Retail 1PC 95%", "Windows", 1.00)
+db.upsert_product("501", "Win10/11 Pro OEM 1PC 97% (Warranty: 30 day)", "Windows", 1.50)
+
+db.set_product_price("505", 50.0)
+db.set_shortcut("505", 11)
+db.set_product_price("501", 50.0)
+db.set_shortcut("501", 12)
+db.ocultar_producto("505")          # como ya lo hiciste con /ocultar 11
+
+assert db.get_product("505")["shortcut"] == 11, "el número no quedó apartado al ocultar"
+assert db.get_product_by_shortcut(11) is None, "un producto oculto sigue comprable"
+
+# el 502 se empieza a vender y se le pasa el /11
+db.set_product_price("502", 50.0)
+msg = FakeMessage()
+correr(admin.numero_cmd(
+    FakeUpdate(message=msg, user=FakeUser(ADMIN, "jefe", "Jefe")),
+    FakeContext(args=["502", "11"]),
+))
+assert db.get_product("502")["shortcut"] == 11, msg.respuestas
+assert db.get_product("505")["shortcut"] is None, "el oculto se quedó con el número"
+assert db.get_product_by_shortcut(11)["code"] == "502"
+assert "oculto" in msg.respuestas[-1], msg.respuestas[-1]
+print("OK el /11 pasa del 505 oculto al 502, y se explica qué pasó")
+
+# el cliente ve el producto correcto en el /11
+db.set_display_name("502", "Windows 11 Pro")
+msg_cat = FakeMessage()
+correr(customer.productos_cmd(FakeUpdate(message=msg_cat, user=FakeUser(1, "ana", "Ana")), FakeContext()))
+assert "/11 — Windows 11 Pro" in msg_cat.respuestas[-1], msg_cat.respuestas[-1]
+assert "Home OEM" not in msg_cat.respuestas[-1]
+print("OK el cliente ve «/11 — Windows 11 Pro»")
+
+# si el número lo tiene un producto A LA VENTA, se intercambian (no se pierde ninguno)
+msg = FakeMessage()
+correr(admin.numero_cmd(
+    FakeUpdate(message=msg, user=FakeUser(ADMIN, "jefe", "Jefe")),
+    FakeContext(args=["501", "11"]),
+))
+assert db.get_product("501")["shortcut"] == 11
+assert db.get_product("502")["shortcut"] == 12, "el otro producto se quedó sin número"
+assert "intercambió" in msg.respuestas[-1], msg.respuestas[-1]
+print("OK entre dos productos a la venta, los números se intercambian")
+
+# no quedan números repetidos
+vendibles = db.list_products_a_la_venta()
+nums = [v["shortcut"] for v in vendibles]
+assert len(nums) == len(set(nums)), f"números repetidos: {nums}"
+assert None not in nums
+print(f"OK sin números repetidos ni huecos raros: {sorted(nums)}")
+
+# avisa si el producto todavía no tiene precio
+db.upsert_product("503", "Win10/11 Pro Retail 5PC", "Windows", 35.0)
+msg = FakeMessage()
+correr(admin.numero_cmd(
+    FakeUpdate(message=msg, user=FakeUser(ADMIN, "jefe", "Jefe")),
+    FakeContext(args=["503", "30"]),
+))
+assert "no tiene precio" in msg.respuestas[-1], msg.respuestas[-1]
+print("OK avisa si le das número a algo que todavía no vendes")
+
+print("\nTODO BIEN (renumerar)")

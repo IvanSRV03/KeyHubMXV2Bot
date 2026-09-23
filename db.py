@@ -337,6 +337,60 @@ def nombre_visible(row) -> str:
     return row["display_name"] or row["name"]
 
 
+def _siguiente_atajo_libre(conn, excepto=None) -> int:
+    usados = {
+        r["shortcut"]
+        for r in conn.execute("SELECT shortcut FROM products WHERE shortcut IS NOT NULL")
+    }
+    usados.discard(excepto)
+    n = 1
+    while n in usados:
+        n += 1
+    return n
+
+
+def set_shortcut(code: str, n: int):
+    """Le cambia el numero corto a un producto.
+
+    Devuelve (que_paso, codigo_del_otro) o None si el producto no existe:
+
+      "sin_cambio"     ya tenia ese numero
+      "asignado"       el numero estaba libre
+      "liberado"       lo tenia un producto oculto, que se queda sin numero
+      "intercambiado"  lo tenia otro producto a la venta; se cambian entre si
+    """
+    with get_conn() as conn:
+        prod = conn.execute(
+            "SELECT code, shortcut FROM products WHERE code=?", (code,)
+        ).fetchone()
+        if prod is None:
+            return None
+        actual = prod["shortcut"]
+        if actual == n:
+            return ("sin_cambio", None)
+
+        ocupante = conn.execute(
+            "SELECT code, price FROM products WHERE shortcut=? AND code<>?", (n, code)
+        ).fetchone()
+
+        if ocupante is None:
+            conn.execute("UPDATE products SET shortcut=? WHERE code=?", (n, code))
+            return ("asignado", None)
+
+        # Se libera primero el numero para no dejar dos productos con el mismo.
+        conn.execute("UPDATE products SET shortcut=NULL WHERE code=?", (ocupante["code"],))
+        conn.execute("UPDATE products SET shortcut=? WHERE code=?", (n, code))
+
+        if ocupante["price"] is None:
+            # Estaba oculto: no vale la pena darle otro numero.
+            return ("liberado", ocupante["code"])
+
+        # Los dos se venden, asi que se intercambian en vez de dejar hueco.
+        suyo = actual if actual is not None else _siguiente_atajo_libre(conn, excepto=n)
+        conn.execute("UPDATE products SET shortcut=? WHERE code=?", (suyo, ocupante["code"]))
+        return ("intercambiado", ocupante["code"])
+
+
 def get_product_by_shortcut(n: int):
     with get_conn() as conn:
         return conn.execute(
