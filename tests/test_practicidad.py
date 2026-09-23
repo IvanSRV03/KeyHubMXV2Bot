@@ -175,4 +175,61 @@ assert "administradores" in q_falso.ediciones[-1]
 assert db.get_customer(1)["balance"] == 59.50, "un cliente se liquidó su propia deuda"
 print("OK un cliente no puede liquidarse la deuda con los botones")
 
-print("\nTODO BIEN (practicidad)")
+# --- 6) los comandos de catálogo aceptan código O número ---
+db.upsert_product("WIN11PRO", "Win10/11 Pro OEM 1PC 97% (Warranty: 30 day)", "Windows", 5.0)
+n_win = db.set_product_price("WIN11PRO", 50.0)
+
+# por número, que es lo que se teclea de forma natural
+msg = FakeMessage()
+correr(admin.nombre_cmd(
+    FakeUpdate(message=msg, user=FakeUser(ADMIN, "jefe", "Jefe")),
+    FakeContext(args=[str(n_win), "Windows", "11", "Pro"]),
+))
+assert db.nombre_visible(db.get_product("WIN11PRO")) == "Windows 11 Pro", msg.respuestas
+print(f"OK /nombre {n_win} Windows 11 Pro — funciona con el número")
+
+# por código, como antes
+msg = FakeMessage()
+correr(admin.nombre_cmd(
+    FakeUpdate(message=msg, user=FakeUser(ADMIN, "jefe", "Jefe")),
+    FakeContext(args=["WIN11PRO", "Windows", "11", "Pro", "Retail"]),
+))
+assert db.nombre_visible(db.get_product("WIN11PRO")) == "Windows 11 Pro Retail"
+print("OK /nombre WIN11PRO ... — sigue funcionando con el código")
+
+# el cliente ve el nombre nuevo, no el del proveedor
+msg_cat = FakeMessage()
+correr(customer.productos_cmd(FakeUpdate(message=msg_cat, user=FakeUser(1, "ana", "Ana")), FakeContext()))
+assert "Windows 11 Pro Retail" in msg_cat.respuestas[-1]
+assert "OEM 1PC 97%" not in msg_cat.respuestas[-1], "el cliente sigue viendo el nombre feo"
+print("OK el cliente ve el nombre bonito en /productos")
+
+# /ocultar por número
+msg = FakeMessage()
+correr(admin.ocultar_cmd(
+    FakeUpdate(message=msg, user=FakeUser(ADMIN, "jefe", "Jefe")),
+    FakeContext(args=[str(n_win)]),
+))
+assert db.get_product_by_shortcut(n_win) is None, msg.respuestas
+print(f"OK /ocultar {n_win} — funciona con el número")
+
+# /precio por número lo revive con el mismo número
+msg = FakeMessage()
+correr(admin.set_price_cmd(
+    FakeUpdate(message=msg, user=FakeUser(ADMIN, "jefe", "Jefe")),
+    FakeContext(args=["WIN11PRO", "60"]),
+))
+assert db.get_product_by_shortcut(n_win)["code"] == "WIN11PRO"
+assert f"/{n_win}" in msg.respuestas[-1], msg.respuestas
+print(f"OK al revivirlo recupera su mismo número (/{n_win})")
+
+# un producto que no existe avisa claro
+msg = FakeMessage()
+correr(admin.nombre_cmd(
+    FakeUpdate(message=msg, user=FakeUser(ADMIN, "jefe", "Jefe")),
+    FakeContext(args=["999", "Lo", "que", "sea"]),
+))
+assert "No encontré" in msg.respuestas[-1] and "/catalogo" in msg.respuestas[-1]
+print("OK un número inexistente avisa y dice dónde buscar")
+
+print("\nTODO BIEN (catálogo por número)")

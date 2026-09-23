@@ -15,6 +15,20 @@ KNOWN_CODES = {
 }
 
 
+def _resolver_producto(arg: str):
+    """Encuentra un producto por su codigo o por su numero corto.
+
+    El admin ve los dos en /catalogo y en la practica teclea el que tenga
+    mas a la mano, asi que los comandos aceptan cualquiera de los dos.
+    Se busca primero por codigo, por si algun codigo del proveedor fuera
+    un puro numero.
+    """
+    producto = db.get_product(arg)
+    if producto is None and arg.lstrip("/").isdigit():
+        producto = db.get_product_by_shortcut(int(arg.lstrip("/")))
+    return producto
+
+
 async def _guard(update: Update) -> bool:
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Este comando es solo para administradores.")
@@ -180,7 +194,9 @@ async def set_price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _guard(update):
         return
     if len(context.args) < 2:
-        await update.message.reply_text("Uso: /precio CODIGO PRECIO")
+        await update.message.reply_text(
+            "Uso: /precio CODIGO PRECIO   (o su número, por ejemplo /precio 3 50)"
+        )
         return
     code, price_str = context.args[0], context.args[1]
     try:
@@ -188,10 +204,14 @@ async def set_price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("El precio debe ser un número.")
         return
-    product = db.get_product(code)
+    product = _resolver_producto(code)
     if not product:
-        await update.message.reply_text("Ese código no existe todavía. Corre /refrescarproductos primero.")
+        await update.message.reply_text(
+            "No encontré ese producto. Puedes usar su código o su número, y "
+            "ver los dos con /catalogo."
+        )
         return
+    code = product["code"]
     n = db.set_product_price(code, price)
     await update.message.reply_text(
         f"Precio actualizado: {code} → ${price:.2f}\n"
@@ -872,17 +892,20 @@ async def ocultar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not context.args:
         await update.message.reply_text(
-            "Uso: /ocultar CODIGO\n"
+            "Uso: /ocultar CODIGO   (o su número, por ejemplo /ocultar 5)\n"
             "Lo quita de /productos. Para volver a venderlo, solo ponle precio otra vez "
             "con /precio y recupera el mismo número."
         )
         return
 
-    code = context.args[0]
-    producto = db.get_product(code)
+    producto = _resolver_producto(context.args[0])
     if not producto:
-        await update.message.reply_text("Ese código no existe. Revísalo con /catalogo.")
+        await update.message.reply_text(
+            "No encontré ese producto. Puedes usar su código o su número, y "
+            "ver los dos con /catalogo."
+        )
         return
+    code = producto["code"]
     if not db.ocultar_producto(code):
         await update.message.reply_text(f"{code} ya estaba oculto (no tenía precio).")
         return
@@ -899,6 +922,7 @@ async def nombre_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text(
             "Uso: /nombre CODIGO El nombre que quieras\n"
+            "     También sirve el número: /nombre 1 Office 2016\n"
             "     /nombre CODIGO original   → regresa al nombre del proveedor\n\n"
             "Sirve para que tus clientes vean \"Windows 11 Pro\" en vez de "
             "\"Win10/11 Pro OEM 1PC 97% (Warranty: 30 day)\".\n"
@@ -906,11 +930,14 @@ async def nombre_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    code = context.args[0]
-    producto = db.get_product(code)
+    producto = _resolver_producto(context.args[0])
     if not producto:
-        await update.message.reply_text("Ese código no existe. Revísalo con /catalogo.")
+        await update.message.reply_text(
+            "No encontré ese producto. Puedes usar su código o su número, y "
+            "ver los dos con /catalogo."
+        )
         return
+    code = producto["code"]
 
     resto = " ".join(context.args[1:]).strip()
     if resto.lower() in ("original", "proveedor", "reset"):

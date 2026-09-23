@@ -128,6 +128,10 @@ Para que no estés a ciegas, te llega un mensaje cuando:
 - `/admincid INSTALLATION_ID` — saca un CID sin cargárselo a ningún cliente
 - `/refrescarproductos` — actualiza el catálogo desde el proveedor
 - `/precio CODIGO PRECIO` — fija el precio de venta (y le asigna su `/1`, `/2`...)
+
+Estos tres aceptan el **código o el número** del producto, lo que tengas más
+a la mano: `/nombre 1 Office 2016` hace lo mismo que `/nombre OFF2016 Office 2016`.
+
 - `/nombre CODIGO Nombre bonito` — cambia el nombre que ve el cliente, para que
   no lea "Win10/11 Pro OEM 1PC 97% (Warranty: 30 day)" sino "Windows 11 Pro".
   Ese nombre **no se pierde** al correr `/refrescarproductos`.
