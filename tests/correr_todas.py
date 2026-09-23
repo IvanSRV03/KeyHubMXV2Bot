@@ -9,7 +9,13 @@ import subprocess
 import sys
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
-PRUEBAS = ["test_db.py", "test_compra.py", "test_arranque.py", "test_concurrencia.py"]
+PRUEBAS = [
+    "test_db.py",
+    "test_compra.py",
+    "test_practicidad.py",
+    "test_arranque.py",
+    "test_concurrencia.py",
+]
 
 fallaron = []
 for nombre in PRUEBAS:

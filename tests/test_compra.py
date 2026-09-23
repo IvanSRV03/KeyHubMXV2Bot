@@ -18,71 +18,11 @@ preparar("compra")
 import db  # noqa: E402
 import provider_api as api  # noqa: E402
 from handlers import customer  # noqa: E402
+from _dobles import FakeContext, FakeQuery, FakeUpdate, correr  # noqa: E402
 
 db.init_db()
 db.ensure_customer(1, "cliente", "Ana", status=db.APROBADO)
 db.upsert_product("OFF2021", "Office 2021", "Office", 8.0, price=25.0)
-
-
-# --- dobles de prueba que imitan lo que da python-telegram-bot ---
-class FakeMessage:
-    def __init__(self, mid=50):
-        self.message_id = mid
-        self.respuestas = []
-
-    async def reply_text(self, texto, **kw):
-        self.respuestas.append(texto)
-        return self
-
-
-class FakeQuery:
-    def __init__(self, data, mid=50):
-        self.data = data
-        self.message = FakeMessage(mid)
-        self.ediciones = []
-        self.alertas = []
-
-    async def answer(self, text=None, **kw):
-        if text:
-            self.alertas.append(text)
-
-    async def edit_message_text(self, texto, **kw):
-        self.ediciones.append(texto)
-
-
-class FakeUser:
-    id = 1
-    username = "cliente"
-    first_name = "Ana"
-
-
-class FakeUpdate:
-    def __init__(self, query):
-        self.callback_query = query
-        self.effective_user = FakeUser()
-
-    @property
-    def effective_message(self):
-        return self.callback_query.message
-
-
-class FakeBot:
-    def __init__(self):
-        self.enviados = []
-
-    async def send_message(self, chat_id, text, **kw):
-        self.enviados.append((chat_id, text))
-
-
-class FakeContext:
-    def __init__(self):
-        self.user_data = {}
-        self.bot = FakeBot()
-        self.args = []
-
-
-def correr(coro):
-    return asyncio.run(coro)
 
 
 # --- 1) compra normal ---
@@ -98,13 +38,13 @@ api.a_buy_key = proveedor_ok
 
 q = FakeQuery("buy:OFF2021:1")
 ctx = FakeContext()
-correr(customer.buy_confirm_callback(FakeUpdate(q), ctx))
+correr(customer.buy_confirm_callback(FakeUpdate(query=q), ctx))
 assert len(llamadas) == 1
 assert db.get_customer(1)["balance"] == 25.0
 orden = db.get_order(llamadas[0])
 assert orden["status"] == db.ORDEN_COMPLETADA and orden["charged"] == 1
 assert "AAAAA-BBBBB-CCCCC" in q.ediciones[-1]
-assert any("Venta" in t for _, t in ctx.bot.enviados), "no se le avisó al admin de la venta"
+assert any("Venta" in t for t in ctx.bot.textos_a(999)), "no se le avisó al admin de la venta"
 print("OK compra normal: cobra $25.00, orden completada y admin avisado")
 
 # --- 2) doble clic en el mismo botón ---
@@ -112,8 +52,8 @@ llamadas.clear()
 q2 = FakeQuery("buy:OFF2021:1", mid=77)
 ctx2 = FakeContext()
 antes = db.get_customer(1)["balance"]
-correr(customer.buy_confirm_callback(FakeUpdate(q2), ctx2))
-correr(customer.buy_confirm_callback(FakeUpdate(q2), ctx2))
+correr(customer.buy_confirm_callback(FakeUpdate(query=q2), ctx2))
+correr(customer.buy_confirm_callback(FakeUpdate(query=q2), ctx2))
 assert len(llamadas) == 1, f"se compró {len(llamadas)} veces con un solo botón"
 assert db.get_customer(1)["balance"] == antes + 25.0, "se cobró doble"
 assert q2.alertas, "no se le avisó al cliente del segundo toque"
@@ -133,12 +73,12 @@ api.a_buy_key = proveedor_caido
 antes = db.get_customer(1)["balance"]
 q3 = FakeQuery("buy:OFF2021:2", mid=88)
 ctx3 = FakeContext()
-correr(customer.buy_confirm_callback(FakeUpdate(q3), ctx3))
+correr(customer.buy_confirm_callback(FakeUpdate(query=q3), ctx3))
 assert db.get_customer(1)["balance"] == antes, "cobró una compra que falló"
 orden3 = db.get_order(llamadas[0])
 assert orden3["status"] == db.ORDEN_PENDIENTE and orden3["charged"] == 0
 assert "ningún cargo" in q3.ediciones[-1]
-assert any("sin confirmar" in t for _, t in ctx3.bot.enviados)
+assert any("sin confirmar" in t for t in ctx3.bot.textos_a(999))
 assert db.list_orders(status=db.ORDEN_PENDIENTE), "la orden no quedó registrada para revisar"
 print("OK proveedor caído: no cobra, deja la orden pendiente y avisa al admin")
 
@@ -150,7 +90,7 @@ async def no_debe_llamarse(code, qty, order_id):
 api.a_buy_key = no_debe_llamarse
 db.set_credit_limit(1, 60.0)
 q4 = FakeQuery("buy:OFF2021:5", mid=99)
-correr(customer.buy_confirm_callback(FakeUpdate(q4), FakeContext()))
+correr(customer.buy_confirm_callback(FakeUpdate(query=q4), FakeContext()))
 assert "límite de crédito" in q4.ediciones[-1]
 print("OK el límite de crédito frena la compra antes de llamar al proveedor")
 
@@ -158,7 +98,7 @@ print("OK el límite de crédito frena la compra antes de llamar al proveedor")
 db.set_credit_limit(1, None)
 db.set_customer_status(1, db.PENDIENTE)
 q5 = FakeQuery("buy:OFF2021:1", mid=101)
-correr(customer.buy_confirm_callback(FakeUpdate(q5), FakeContext()))
+correr(customer.buy_confirm_callback(FakeUpdate(query=q5), FakeContext()))
 assert any("pendiente de aprobación" in r for r in q5.message.respuestas)
 print("OK un cliente no aprobado no puede confirmar una compra")
 

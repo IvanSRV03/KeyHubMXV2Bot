@@ -77,14 +77,49 @@ clientes por cada producto y por cada Confirmation ID.
    `/preciocid 2.00`
    (Si lo dejas en 0, la consulta de CID no genera cargo.)
 
-## 5. Comandos para tus clientes
+## 5. Cómo compran tus clientes
 
-- `/start` — se da de alta automáticamente
-- `/productos` — ve el catálogo con precios
-- `/comprar CODIGO CANTIDAD` — compra (le pide confirmación con botones antes de procesar)
-- `/cid` — te pide el Installation ID (texto o foto) y te regresa el Confirmation ID
-- `/saldo` — cuánto debe acumulado
+La idea es que el cliente no tenga que aprenderse nada.
+
+1. Manda `/productos` y ve la lista numerada, con un botón por producto.
+2. Toca el botón **o** manda el número directo: `/1`, `/2`, ...
+3. El bot le muestra qué es, cuánto cuesta y cómo le quedaría el saldo.
+4. Un toque en ✅ y le llega la clave.
+
+Los números los asigna el bot solo, la primera vez que le pones precio a un
+producto con `/precio`, y **ya no cambian** — así un cliente que se aprendió
+"/3 es Office 2021" no termina comprando otra cosa cuando crezca el catálogo.
+
+Lo demás para el cliente:
+
+- `/cid` — su Confirmation ID (escrito o por foto)
+- `/saldo` — cuánto debe y cuánto crédito le queda
 - `/historial` — sus últimos movimientos
+- `/reposicion` — pedir el cambio de una clave que no le sirvió
+- `/comprar CODIGO CANTIDAD` — sigue funcionando, por si ya se acostumbró
+
+### Reposiciones
+
+Si una clave no le sirve, el cliente manda `/reposicion`, toca la compra que
+falló y escribe qué pasó. A ti te llega el aviso con el motivo y dos botones:
+
+- **✅ Aprobar** → el bot le compra otra clave al proveedor y se la manda al
+  cliente **sin cobrarle nada**. El costo del proveedor lo absorbes tú, igual
+  que cuando repones a mano.
+- **❌ Rechazar** → se le avisa al cliente.
+
+Con `/reposiciones` ves las que quedan pendientes. Una reposición ya resuelta
+no se vuelve a surtir aunque toques el botón otra vez.
+
+### Qué te avisa el bot
+
+Para que no estés a ciegas, te llega un mensaje cuando:
+
+- alguien nuevo pide acceso
+- un cliente **compra** (quién, qué, cuánto, número de orden)
+- un cliente **genera un CID** (quién, cuánto se le cobró, su saldo)
+- un cliente pide una **reposición**
+- una compra queda **sin confirmar** con el proveedor
 
 ## 6. Comandos para ti (administrador)
 
@@ -97,8 +132,15 @@ clientes por cada producto y por cada Confirmation ID.
 - `/comprarstock CODIGO CANTIDAD` — compra al proveedor sin cargarlo a ningún cliente (para tener inventario propio)
 - `/clientes` — lista de todos los clientes con su saldo
 - `/cliente TELEGRAM_ID` — detalle y últimos movimientos de un cliente
-- `/cobrar TELEGRAM_ID MONTO concepto` — agrega un cargo manual
-- `/pagar TELEGRAM_ID MONTO` — registra que el cliente te pagó (baja su saldo)
+### Cobrar y registrar pagos (sin escribir IDs)
+
+- `/pagar` — a secas. El bot te muestra quién te debe, con botones. Tocas al
+  cliente y eliges **Liquidó todo** o **Otro monto**. Si es otro monto, solo
+  escribes el número (`250.50` o `$250.50`, da igual).
+- `/cobrar` — igual, pero para agregar un cargo manual.
+
+Los dos siguen aceptando la forma larga (`/pagar 123456 250`) si la prefieres.
+Cuando registras un pago, al cliente le llega el aviso con su saldo nuevo.
 
 ### Control de acceso (quién puede comprarte)
 

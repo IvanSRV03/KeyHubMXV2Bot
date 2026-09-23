@@ -85,8 +85,21 @@ def main():
     app.add_handler(CommandHandler("ordenes", admin.ordenes_cmd))
     app.add_handler(CommandHandler("orden", admin.orden_cmd))
 
-    # Botones inline (confirmar/cancelar compra)
+    # Reposiciones
+    app.add_handler(CommandHandler("reposicion", customer.reposicion_cmd))
+    app.add_handler(CommandHandler("reposiciones", admin.reposiciones_cmd))
+
+    # Botones inline
     app.add_handler(CallbackQueryHandler(customer.buy_confirm_callback, pattern=r"^buy:"))
+    app.add_handler(CallbackQueryHandler(customer.pick_callback, pattern=r"^pick:"))
+    app.add_handler(CallbackQueryHandler(customer.reposicion_pick_callback, pattern=r"^repo:"))
+    app.add_handler(CallbackQueryHandler(admin.reposicion_resolver_callback, pattern=r"^repo(ok|no):"))
+    app.add_handler(CallbackQueryHandler(admin.pagar_callback, pattern=r"^pay:"))
+    app.add_handler(CallbackQueryHandler(admin.cobrar_callback, pattern=r"^chg:"))
+
+    # Atajos numericos: el cliente manda /1, /2, ... para comprar directo.
+    # Va como MessageHandler porque los numeros de producto son dinamicos.
+    app.add_handler(MessageHandler(filters.Regex(r"^/\d{1,3}(\s+\d{1,3})?$"), customer.atajo_handler))
 
     # Mensajes libres (para el flujo de /cid cuando se espera el Installation ID)
     app.add_handler(MessageHandler(filters.PHOTO, customer.generic_photo_handler))

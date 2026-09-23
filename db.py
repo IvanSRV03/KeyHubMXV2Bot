@@ -15,6 +15,11 @@ ORDEN_PENDIENTE = "pendiente"    # se mando, todavia no se confirma que llegaron
 ORDEN_COMPLETADA = "completada"  # el proveedor devolvio las claves y se le cobro al cliente
 ORDEN_FALLIDA = "fallida"        # confirmado que no se surtio; no se cobro nada
 
+# Estados de una solicitud de reposicion de clave.
+REPO_SOLICITADA = "solicitada"
+REPO_APROBADA = "aprobada"
+REPO_RECHAZADA = "rechazada"
+
 # Valores por defecto de los ajustes globales, usados cuando el admin todavia
 # no los configuro. Son conservadores a proposito: mas vale que el bot diga
 # "no" de mas y el admin lo suba, a que alguien compre de mas a tu costo.
@@ -84,6 +89,17 @@ def init_db():
                 created_at TEXT,
                 updated_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS reposiciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER,
+                order_id TEXT,
+                code TEXT,
+                motivo TEXT,
+                status TEXT,
+                nueva_order_id TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_tx_customer ON transactions (telegram_id, id DESC);
             CREATE INDEX IF NOT EXISTS idx_orders_status ON orders (status, created_at DESC);
             """
@@ -105,6 +121,12 @@ def _migrate(conn):
     if "credit_limit" not in cols:
         # NULL = usa el limite global configurado en settings.
         conn.execute("ALTER TABLE customers ADD COLUMN credit_limit REAL")
+
+    pcols = {r["name"] for r in conn.execute("PRAGMA table_info(products)")}
+    if "shortcut" not in pcols:
+        # Numero corto para comprar con /1, /2, ... Solo lo tienen los
+        # productos con precio de venta, que son los que el cliente ve.
+        conn.execute("ALTER TABLE products ADD COLUMN shortcut INTEGER")
 
 
 # --------------------------------------------------------------------------
@@ -233,9 +255,49 @@ def upsert_product(code: str, name: str, category: str, cost: float, price=None)
         )
 
 
-def set_product_price(code: str, price: float):
+def set_product_price(code: str, price: float) -> int:
+    """Fija el precio y le asigna un numero corto (/1, /2, ...) si no tenia.
+
+    Devuelve el numero corto del producto. El numero se conserva una vez
+    asignado, para que un cliente que ya se aprendio "/3 es Office 2021" no
+    acabe comprando otra cosa cuando cambie el catalogo.
+    """
     with get_conn() as conn:
         conn.execute("UPDATE products SET price=? WHERE code=?", (price, code))
+        row = conn.execute("SELECT shortcut FROM products WHERE code=?", (code,)).fetchone()
+        if row and row["shortcut"] is not None:
+            return row["shortcut"]
+        usados = {
+            r["shortcut"]
+            for r in conn.execute("SELECT shortcut FROM products WHERE shortcut IS NOT NULL")
+        }
+        n = 1
+        while n in usados:
+            n += 1
+        conn.execute("UPDATE products SET shortcut=? WHERE code=?", (n, code))
+        return n
+
+
+def get_product_by_shortcut(n: int):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM products WHERE shortcut=? AND price IS NOT NULL", (n,)
+        ).fetchone()
+
+
+def list_products_a_la_venta():
+    """Solo los que el cliente puede comprar, en orden de numero corto."""
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM products WHERE price IS NOT NULL ORDER BY shortcut"
+        ).fetchall()
+
+
+def clientes_con_adeudo():
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM customers WHERE balance > 0 ORDER BY balance DESC"
+        ).fetchall()
 
 
 def list_products():
@@ -298,6 +360,56 @@ def list_orders(status: str = None, limit: int = 20):
             ).fetchall()
         return conn.execute(
             "SELECT * FROM orders ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+
+# --------------------------------------------------------------------------
+# Reposiciones de clave
+# --------------------------------------------------------------------------
+
+def crear_reposicion(telegram_id: int, order_id: str, code: str, motivo: str) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO reposiciones (telegram_id, order_id, code, motivo, status, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (telegram_id, order_id, code, motivo, REPO_SOLICITADA, _now(), _now()),
+        )
+        return cur.lastrowid
+
+
+def get_reposicion(repo_id: int):
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM reposiciones WHERE id=?", (repo_id,)).fetchone()
+
+
+def resolver_reposicion(repo_id: int, status: str, nueva_order_id: str = None):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE reposiciones SET status=?, nueva_order_id=?, updated_at=? WHERE id=?",
+            (status, nueva_order_id, _now(), repo_id),
+        )
+
+
+def list_reposiciones(status: str = None, limit: int = 20):
+    with get_conn() as conn:
+        if status:
+            return conn.execute(
+                "SELECT * FROM reposiciones WHERE status=? ORDER BY id DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        return conn.execute(
+            "SELECT * FROM reposiciones ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+
+def compras_del_cliente(telegram_id: int, limit: int = 10):
+    """Compras completadas del cliente, para que elija cual reponer."""
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT * FROM orders
+               WHERE telegram_id=? AND status=?
+               ORDER BY created_at DESC LIMIT ?""",
+            (telegram_id, ORDEN_COMPLETADA, limit),
         ).fetchall()
 
 

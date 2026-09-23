@@ -1,8 +1,9 @@
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 import db
 import provider_api as api
+from handlers import customer
 from handlers.common import is_admin, reply_long
 
 # Según lo que confirmaste: C008 = clave válida, C060 = clave no válida.
@@ -155,7 +156,8 @@ async def catalogo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for it in items:
             precio = f"${it['price']:.2f}" if it["price"] is not None else "sin precio"
             costo = f"${it['cost']:.2f}" if it["cost"] is not None else "?"
-            block += f"  {it['code']} — {it['name']} (costo prov.: {costo}, venta: {precio})\n"
+            atajo = f"/{it['shortcut']} " if it["shortcut"] else "    "
+            block += f"  {atajo}{it['code']} — {it['name']} (costo prov.: {costo}, venta: {precio})\n"
         if len(current) + len(block) > 3500:
             chunks.append(current)
             current = block
@@ -185,8 +187,11 @@ async def set_price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not product:
         await update.message.reply_text("Ese código no existe todavía. Corre /refrescarproductos primero.")
         return
-    db.set_product_price(code, price)
-    await update.message.reply_text(f"Precio actualizado: {code} → ${price:.2f}")
+    n = db.set_product_price(code, price)
+    await update.message.reply_text(
+        f"Precio actualizado: {code} → ${price:.2f}\n"
+        f"Tus clientes ya lo pueden comprar mandando /{n}"
+    )
 
 
 async def set_cid_price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -251,8 +256,15 @@ async def cliente_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cobrar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _guard(update):
         return
+    if not context.args:
+        await _lista_para_cobrar(
+            update, "chg", "¿A quién le vas a cobrar? Toca su nombre:", solo_con_adeudo=False
+        )
+        return
     if len(context.args) < 2:
-        await update.message.reply_text("Uso: /cobrar TELEGRAM_ID MONTO [concepto]")
+        await update.message.reply_text(
+            "Manda /cobrar solo, sin nada más, y te muestro la lista de clientes."
+        )
         return
     try:
         tid = int(context.args[0])
@@ -276,8 +288,15 @@ async def cobrar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def pagar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _guard(update):
         return
+    if not context.args:
+        await _lista_para_cobrar(
+            update, "pay", "¿Quién te pagó? Toca su nombre:", solo_con_adeudo=True
+        )
+        return
     if len(context.args) < 2:
-        await update.message.reply_text("Uso: /pagar TELEGRAM_ID MONTO")
+        await update.message.reply_text(
+            "Manda /pagar solo, sin nada más, y te muestro la lista de quién te debe."
+        )
         return
     try:
         tid = int(context.args[0])
@@ -587,3 +606,256 @@ async def orden_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("\n(No tengo esa orden registrada localmente.)")
 
     await reply_long(update, lines)
+
+
+# --------------------------------------------------------------------------
+# Reposiciones de clave
+# --------------------------------------------------------------------------
+
+async def reposiciones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Solicitudes de reposición sin resolver."""
+    if not await _guard(update):
+        return
+    rows = db.list_reposiciones(status=db.REPO_SOLICITADA)
+    if not rows:
+        await update.message.reply_text("No hay reposiciones pendientes. ✅")
+        return
+    for r in rows:
+        c = db.get_customer(r["telegram_id"])
+        quien = (c["username"] or c["first_name"]) if c else r["telegram_id"]
+        await update.message.reply_text(
+            f"⚠️ Reposición #{r['id']}\n"
+            f"Cliente: @{quien} (ID {r['telegram_id']})\n"
+            f"Producto: {r['code']}\n"
+            f"Compra: {r['order_id']}\n\n"
+            f"Motivo: {r['motivo']}",
+            reply_markup=InlineKeyboardMarkup(
+                [[
+                    InlineKeyboardButton("✅ Aprobar", callback_data=f"repook:{r['id']}"),
+                    InlineKeyboardButton("❌ Rechazar", callback_data=f"repono:{r['id']}"),
+                ]]
+            ),
+        )
+
+
+async def reposicion_resolver_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Aprobar o rechazar una reposición desde el botón del aviso."""
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(update.effective_user.id):
+        await query.edit_message_text("⛔ Solo un administrador puede resolver reposiciones.")
+        return
+
+    accion, repo_id = query.data.split(":")
+    repo = db.get_reposicion(int(repo_id))
+    if not repo:
+        await query.edit_message_text("No encontré esa solicitud.")
+        return
+    if repo["status"] != db.REPO_SOLICITADA:
+        await query.edit_message_text(f"Esa reposición ya estaba {repo['status']}.")
+        return
+
+    if accion == "repono":
+        db.resolver_reposicion(repo["id"], db.REPO_RECHAZADA)
+        await query.edit_message_text(f"Reposición #{repo['id']} rechazada.")
+        await _avisar_cliente(
+            context,
+            repo["telegram_id"],
+            f"Tu solicitud de reposición de {repo['code']} fue rechazada. "
+            "Si tienes dudas, escríbele al administrador.",
+        )
+        return
+
+    # Aprobada: se le compra otra clave al proveedor, sin cargo para el cliente.
+    order_id = api.make_order_id()
+    db.create_order(order_id, repo["telegram_id"], repo["code"], 1, 0.0)
+    await query.edit_message_text(
+        f"⏳ Reposición #{repo['id']} aprobada. Comprando la clave de reemplazo..."
+    )
+
+    try:
+        data = await api.a_buy_key(repo["code"], 1, order_id)
+    except api.ProviderError as e:
+        db.update_order(order_id, db.ORDEN_PENDIENTE, error=str(e), charged=False)
+        await query.edit_message_text(
+            f"❌ No se pudo comprar la clave de reemplazo: {e}\n"
+            f"La reposición #{repo['id']} sigue pendiente. Orden: {order_id}\n"
+            f"Revísala con /orden {order_id} y vuelve a intentar con /reposiciones."
+        )
+        return
+
+    keys = data.get("keys") or data.get("data")
+    db.update_order(order_id, db.ORDEN_COMPLETADA, keys=keys, charged=False)
+    db.resolver_reposicion(repo["id"], db.REPO_APROBADA, nueva_order_id=order_id)
+    # No se le cobra nada al cliente: la reposición va por tu cuenta.
+    db.add_charge(
+        repo["telegram_id"],
+        "reposicion",
+        {"repo_id": repo["id"], "code": repo["code"], "order_id": order_id},
+        0.0,
+    )
+
+    entregada = await _avisar_cliente(
+        context,
+        repo["telegram_id"],
+        f"✅ Tu reposición de {repo['code']} fue aprobada. Aquí está tu clave nueva:\n\n"
+        f"{customer._formatear_claves(keys)}\n\n"
+        "Sin costo — no se te hizo ningún cargo.",
+    )
+    extra = "" if entregada else "\n⚠️ No le pude entregar la clave por Telegram, pásasela tú."
+    await query.edit_message_text(
+        f"✅ Reposición #{repo['id']} resuelta.\nOrden: {order_id}\n\n{keys}{extra}"
+    )
+
+
+# --------------------------------------------------------------------------
+# Cobros y pagos con botones
+# --------------------------------------------------------------------------
+
+async def _lista_para_cobrar(update: Update, prefijo: str, titulo: str, solo_con_adeudo: bool):
+    rows = db.clientes_con_adeudo() if solo_con_adeudo else db.list_customers()
+    if not rows:
+        await update.message.reply_text(
+            "Ningún cliente te debe nada. 🎉" if solo_con_adeudo else "No hay clientes registrados."
+        )
+        return
+    botones = [
+        [InlineKeyboardButton(
+            f"@{r['username'] or r['first_name'] or r['telegram_id']} — ${r['balance']:.2f}",
+            callback_data=f"{prefijo}:{r['telegram_id']}",
+        )]
+        for r in rows[:20]
+    ]
+    await update.message.reply_text(titulo, reply_markup=InlineKeyboardMarkup(botones))
+
+
+async def pagar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Registrar un pago sin tener que escribir IDs ni montos a mano."""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        await query.edit_message_text("⛔ Solo para administradores.")
+        return
+
+    partes = query.data.split(":")
+    tid = int(partes[1])
+    c = db.get_customer(tid)
+    if not c:
+        await query.edit_message_text("Ese cliente ya no existe.")
+        return
+    nombre = c["username"] or c["first_name"] or tid
+
+    # Paso 1: se eligió al cliente, se ofrecen las opciones de pago.
+    if len(partes) == 2:
+        await query.edit_message_text(
+            f"@{nombre} debe ${c['balance']:.2f}\n¿Cuánto te pagó?",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton(
+                        f"💵 Liquidó todo (${c['balance']:.2f})",
+                        callback_data=f"pay:{tid}:todo",
+                    )],
+                    [InlineKeyboardButton("✏️ Otro monto", callback_data=f"pay:{tid}:otro")],
+                ]
+            ),
+        )
+        return
+
+    # Paso 2: monto.
+    if partes[2] == "otro":
+        context.user_data["pago_pendiente_de"] = tid
+        await query.edit_message_text(
+            f"Escríbeme cuánto te pagó @{nombre} (solo el número, por ejemplo 250.50)."
+        )
+        return
+
+    monto = c["balance"]
+    if monto <= 0:
+        await query.edit_message_text(f"@{nombre} no debe nada.")
+        return
+    db.add_payment(tid, monto, note="liquidación registrada por admin")
+    nuevo = db.get_customer(tid)["balance"]
+    await query.edit_message_text(
+        f"✅ Pago de ${monto:.2f} registrado.\n@{nombre} ahora debe ${nuevo:.2f}"
+    )
+    await _avisar_cliente(
+        context, tid, f"✅ Se registró tu pago de ${monto:.2f}. Tu saldo ahora es ${nuevo:.2f}"
+    )
+
+
+async def monto_texto_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Si el admin está escribiendo el monto de un pago, lo procesa.
+
+    Devuelve True si consumió el mensaje, para que el manejador de texto
+    libre no lo trate como otra cosa.
+    """
+    es_pago = "pago_pendiente_de" in context.user_data
+    es_cobro = "cobro_pendiente_de" in context.user_data
+    if not (es_pago or es_cobro):
+        return False
+
+    clave = "pago_pendiente_de" if es_pago else "cobro_pendiente_de"
+    tid = context.user_data[clave]
+
+    try:
+        monto = float(update.message.text.strip().replace("$", "").replace(",", ""))
+    except ValueError:
+        await update.message.reply_text("No le entendí. Mándame solo el número, por ejemplo 250.50")
+        return True
+
+    context.user_data.pop(clave, None)
+    if monto <= 0:
+        await update.message.reply_text("El monto tiene que ser mayor a 0.")
+        return True
+
+    if es_pago:
+        aplicado = db.add_payment(tid, monto, note="pago registrado por admin")
+    else:
+        aplicado = db.add_charge(tid, "charge", {"concepto": "cargo manual"}, monto)
+
+    if not aplicado:
+        await update.message.reply_text("Ese cliente ya no existe.")
+        return True
+
+    c = db.get_customer(tid)
+    nombre = c["username"] or c["first_name"] or tid
+    if es_pago:
+        await update.message.reply_text(
+            f"✅ Pago de ${monto:.2f} registrado.\n@{nombre} ahora debe ${c['balance']:.2f}"
+        )
+        await _avisar_cliente(
+            context, tid,
+            f"✅ Se registró tu pago de ${monto:.2f}. Tu saldo ahora es ${c['balance']:.2f}",
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ Cargo de ${monto:.2f} aplicado.\n@{nombre} ahora debe ${c['balance']:.2f}"
+        )
+        await _avisar_cliente(
+            context, tid,
+            f"Se agregó un cargo de ${monto:.2f} a tu cuenta. Tu saldo ahora es ${c['balance']:.2f}",
+        )
+    return True
+
+
+async def cobrar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Elegir al cliente al que se le va a cobrar, sin escribir su ID."""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        await query.edit_message_text("⛔ Solo para administradores.")
+        return
+
+    tid = int(query.data.split(":")[1])
+    c = db.get_customer(tid)
+    if not c:
+        await query.edit_message_text("Ese cliente ya no existe.")
+        return
+
+    context.user_data["cobro_pendiente_de"] = tid
+    nombre = c["username"] or c["first_name"] or tid
+    await query.edit_message_text(
+        f"@{nombre} debe ${c['balance']:.2f}\n"
+        "¿Cuánto le vas a cobrar? Mándame solo el número."
+    )

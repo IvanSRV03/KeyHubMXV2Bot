@@ -8,18 +8,19 @@ from telegram.ext import ContextTypes
 import db
 import provider_api as api
 import ocr
+from config import ADMIN_IDS
 from handlers.common import require_approved, reply_long, notify_admins, is_admin
 
 logger = logging.getLogger(__name__)
 
 WELCOME = (
     "👋 Bienvenido.\n\n"
-    "Comandos disponibles:\n"
-    "/productos - ver catálogo\n"
-    "/comprar CODIGO CANTIDAD - comprar una licencia\n"
-    "/cid - obtener tu Confirmation ID (envía tu Installation ID como texto o foto)\n"
-    "/saldo - ver tu saldo pendiente\n"
-    "/historial - ver tus últimos movimientos\n"
+    "Para comprar una clave, manda /productos y toca la que quieras.\n"
+    "O más rápido todavía: manda el número del producto, por ejemplo /1\n\n"
+    "Lo demás:\n"
+    "/cid — sacar tu Confirmation ID\n"
+    "/saldo — cuánto debes\n"
+    "/reposicion — si una clave no te sirvió\n"
 )
 
 PENDIENTE_MSG = (
@@ -58,7 +59,35 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(PENDIENTE_MSG)
 
 
+AYUDA_ADMIN = (
+    "🛠 Comandos de administrador\n\n"
+    "Día a día:\n"
+    "/pendientes — solicitudes de acceso por aprobar\n"
+    "/reposiciones — reposiciones por resolver\n"
+    "/clientes — quién te debe y cuánto\n"
+    "/pagar — registrar un pago (te muestra la lista, sin escribir IDs)\n"
+    "/cobrar — cargo manual (igual, con lista)\n\n"
+    "Catálogo:\n"
+    "/refrescarproductos — traer el catálogo del proveedor\n"
+    "/catalogo — ver todo con costos y números\n"
+    "/precio CODIGO PRECIO — poner precio (le asigna su /1, /2, ...)\n"
+    "/preciocid PRECIO — cuánto cobras por un CID\n\n"
+    "Clientes:\n"
+    "/aprobar ID · /bloquear ID\n"
+    "/limite ID MONTO · /limiteglobal MONTO · /maxcantidad N\n"
+    "/cliente ID — detalle de uno\n\n"
+    "Proveedor:\n"
+    "/checkkey CLAVES · /checkredeem CLAVES\n"
+    "/admincid IID — CID sin cargarlo a nadie\n"
+    "/comprarstock CODIGO CANTIDAD — inventario propio\n"
+    "/ordenes · /orden ORDER_ID — compras sin confirmar\n"
+)
+
+
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_admin(update.effective_user.id):
+        await update.message.reply_text(AYUDA_ADMIN)
+        return
     await update.message.reply_text(WELCOME)
 
 
@@ -96,78 +125,138 @@ async def productos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_approved(update, context):
         return
 
-    rows = db.list_products()
-    by_cat = {}
-    for r in rows:
-        if r["price"] is None:
-            continue
-        by_cat.setdefault(r["category"] or "Otros", []).append(r)
-
-    if not by_cat:
+    rows = db.list_products_a_la_venta()
+    if not rows:
         await update.message.reply_text("Todavía no hay productos disponibles. Vuelve a intentar más tarde.")
         return
 
-    lines = []
-    for cat, items in by_cat.items():
-        lines.append(f"\n📁 {cat}")
-        for it in items:
-            lines.append(f"  {it['code']} — {it['name']} — ${it['price']:.2f}")
-    lines.append("\nPara comprar: /comprar CODIGO CANTIDAD")
-    await reply_long(update, lines)
+    lines = ["Toca el producto que quieras, o manda su número (por ejemplo /1):", ""]
+    botones = []
+    fila = []
+    for r in rows:
+        n = r["shortcut"]
+        lines.append(f"/{n} — {r['name']} — ${r['price']:.2f}")
+        fila.append(InlineKeyboardButton(f"{n}. {r['name']}", callback_data=f"pick:{n}"))
+        if len(fila) == 2:
+            botones.append(fila)
+            fila = []
+    if fila:
+        botones.append(fila)
+
+    await update.message.reply_text(
+        "\n".join(lines), reply_markup=InlineKeyboardMarkup(botones)
+    )
 
 
-async def comprar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def atajo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Compra por numero corto: el cliente manda /1 y ya.
+
+    Es la forma mas rapida de pedir una clave: no hay que acordarse del
+    codigo del proveedor ni escribir cantidades.
+    """
     customer = await require_approved(update, context)
     if not customer:
         return
 
-    if len(context.args) < 2:
+    texto = update.message.text.strip()
+    match = re.match(r"^/(\d{1,3})(?:\s+(\d{1,3}))?$", texto)
+    if not match:
+        return
+    n = int(match.group(1))
+    qty = int(match.group(2)) if match.group(2) else 1
+
+    product = db.get_product_by_shortcut(n)
+    if not product:
         await update.message.reply_text(
-            "Uso: /comprar CODIGO CANTIDAD\nUsa /productos para ver el catálogo y los códigos."
+            f"No tengo ningún producto con el número {n}. Manda /productos para ver la lista."
         )
         return
 
-    code, qty_str = context.args[0], context.args[1]
-    try:
-        qty = int(qty_str)
-    except ValueError:
-        await update.message.reply_text("La cantidad debe ser un número entero mayor a 0.")
-        return
-    if qty <= 0:
-        await update.message.reply_text("La cantidad debe ser un número entero mayor a 0.")
+    await _pedir_confirmacion(update.message, customer, product, qty)
+
+
+async def pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toque en un boton del catalogo."""
+    query = update.callback_query
+    await query.answer()
+    customer = await require_approved(update, context)
+    if not customer:
         return
 
+    n = int(query.data.split(":")[1])
+    product = db.get_product_by_shortcut(n)
+    if not product:
+        await query.edit_message_text("Ese producto ya no está disponible.")
+        return
+
+    await _pedir_confirmacion(query.message, customer, product, 1)
+
+
+async def _pedir_confirmacion(message, customer, product, qty: int):
+    """Muestra producto, precio y como le quedaria el saldo, con un solo boton."""
     max_qty = db.get_int_setting("max_qty", db.DEFAULT_MAX_QTY)
-    if qty > max_qty:
-        await update.message.reply_text(
-            f"⚠️ El máximo por compra es {max_qty} unidades. Si necesitas más, pídeselo al administrador."
-        )
+    if qty < 1:
+        await message.reply_text("La cantidad debe ser al menos 1.")
         return
-
-    product = db.get_product(code)
-    if not product or product["price"] is None:
-        await update.message.reply_text("Ese código no existe o no está disponible por ahora.")
+    if qty > max_qty:
+        await message.reply_text(
+            f"⚠️ El máximo por compra es {max_qty}. Si necesitas más, pídeselo al administrador."
+        )
         return
 
     total = product["price"] * qty
     ok, aviso = _cabe_en_el_credito(customer, total)
     if not ok:
-        await update.message.reply_text(aviso)
+        await message.reply_text(aviso)
         return
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("✅ Confirmar compra", callback_data=f"buy:{code}:{qty}"),
-                InlineKeyboardButton("❌ Cancelar", callback_data="buy:cancel"),
-            ]
-        ]
+    cantidad = f"\nCantidad: {qty}" if qty > 1 else ""
+    await message.reply_text(
+        f"📦 {product['name']} — ${product['price']:.2f}{cantidad}\n"
+        f"Total: ${total:.2f}\n"
+        f"Tu saldo quedaría en ${customer['balance'] + total:.2f}",
+        reply_markup=InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton("✅ Sí, cómprala", callback_data=f"buy:{product['code']}:{qty}"),
+                InlineKeyboardButton("❌ No", callback_data="buy:cancel"),
+            ]]
+        ),
     )
-    await update.message.reply_text(
-        f"📦 {product['name']}\nCantidad: {qty}\nTotal que se acumulará a tu cuenta: ${total:.2f}\n\n"
-        f"¿Confirmas la compra?",
-        reply_markup=keyboard,
-    )
+
+
+async def comprar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Compra por codigo o por numero corto. Se conserva por costumbre, pero
+    lo normal es que el cliente use /productos o el atajo /1."""
+    customer = await require_approved(update, context)
+    if not customer:
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Manda /productos para ver la lista y tocar lo que quieras,\n"
+            "o el número del producto directo, por ejemplo /1"
+        )
+        return
+
+    pedido = context.args[0]
+    qty = 1
+    if len(context.args) > 1:
+        try:
+            qty = int(context.args[1])
+        except ValueError:
+            await update.message.reply_text("La cantidad debe ser un número entero.")
+            return
+
+    product = db.get_product(pedido)
+    if not product and pedido.isdigit():
+        product = db.get_product_by_shortcut(int(pedido))
+    if not product or product["price"] is None:
+        await update.message.reply_text(
+            "No encontré ese producto. Manda /productos para ver la lista."
+        )
+        return
+
+    await _pedir_confirmacion(update.message, customer, product, qty)
 
 
 def _formatear_claves(keys) -> str:
@@ -311,9 +400,21 @@ async def cid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def generic_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Texto suelto: solo significa algo si el bot esta esperando un dato."""
+    # Import local para no crear un ciclo entre customer y admin.
+    from handlers import admin
+
+    if await admin.monto_texto_handler(update, context):
+        return
+
     if context.user_data.get("awaiting_iid"):
         context.user_data["awaiting_iid"] = False
         await _process_cid(update, context, update.message.text)
+        return
+
+    if context.user_data.get("repo_order_id"):
+        await _registrar_reposicion(update, context, update.message.text)
+        return
 
 
 async def generic_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -402,3 +503,96 @@ async def _process_cid(update: Update, context: ContextTypes.DEFAULT_TYPE, iid: 
 
     extra = f"\n\n💰 Se agregaron ${price:.2f} a tu cuenta pendiente." if price > 0 else ""
     await message.reply_text(f"🆔 Tu Confirmation ID es:\n\n{cid}{extra}")
+
+    cargo = f" — ${price:.2f}" if price > 0 else " — sin cargo"
+    await notify_admins(
+        context,
+        f"🆔 CID generado{cargo}\n"
+        f"Cliente: @{user.username or user.first_name} (ID {user.id})\n"
+        f"Saldo ahora: ${db.get_customer(user.id)['balance']:.2f}",
+    )
+
+
+# --------------------------------------------------------------------------
+# Reposición de claves
+# --------------------------------------------------------------------------
+
+async def reposicion_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """El cliente pide el cambio de una clave que no le sirvio."""
+    customer = await require_approved(update, context)
+    if not customer:
+        return
+
+    compras = db.compras_del_cliente(update.effective_user.id, limit=8)
+    if not compras:
+        await update.message.reply_text(
+            "No tengo compras tuyas registradas todavía, así que no hay nada que reponer."
+        )
+        return
+
+    botones = [
+        [InlineKeyboardButton(
+            f"{o['code']} — {o['created_at'][:10]}",
+            callback_data=f"repo:{o['order_id']}",
+        )]
+        for o in compras
+    ]
+    await update.message.reply_text(
+        "¿Cuál clave no te sirvió? Toca la compra:",
+        reply_markup=InlineKeyboardMarkup(botones),
+    )
+
+
+async def reposicion_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not await require_approved(update, context):
+        return
+
+    order_id = query.data.split(":", 1)[1]
+    orden = db.get_order(order_id)
+    if not orden or orden["telegram_id"] != update.effective_user.id:
+        await query.edit_message_text("No encontré esa compra.")
+        return
+
+    context.user_data["repo_order_id"] = order_id
+    await query.edit_message_text(
+        f"Compra: {orden['code']} del {orden['created_at'][:10]}\n\n"
+        "Escríbeme qué pasó con la clave (por ejemplo: \"dice que ya fue usada\").\n"
+        "Eso es lo que va a leer el administrador."
+    )
+
+
+async def _registrar_reposicion(update: Update, context: ContextTypes.DEFAULT_TYPE, motivo: str):
+    """Guarda la solicitud y se la manda al admin con botones."""
+    order_id = context.user_data.pop("repo_order_id", None)
+    user = update.effective_user
+    orden = db.get_order(order_id) if order_id else None
+    if not orden:
+        await update.message.reply_text("Se me perdió la referencia de la compra. Vuelve a mandar /reposicion.")
+        return
+
+    repo_id = db.crear_reposicion(user.id, order_id, orden["code"], motivo.strip())
+
+    await update.message.reply_text(
+        "✅ Solicitud enviada. El administrador la va a revisar y te avisa en cuanto la resuelva."
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                admin_id,
+                f"⚠️ Solicitud de reposición #{repo_id}\n"
+                f"Cliente: @{user.username or user.first_name} (ID {user.id})\n"
+                f"Producto: {orden['code']}\n"
+                f"Compra: {order_id} ({orden['created_at'][:10]})\n\n"
+                f"Motivo: {motivo.strip()}",
+                reply_markup=InlineKeyboardMarkup(
+                    [[
+                        InlineKeyboardButton("✅ Aprobar", callback_data=f"repook:{repo_id}"),
+                        InlineKeyboardButton("❌ Rechazar", callback_data=f"repono:{repo_id}"),
+                    ]]
+                ),
+            )
+        except Exception:
+            logger.warning("No se pudo avisar al admin %s de la reposición", admin_id, exc_info=True)
