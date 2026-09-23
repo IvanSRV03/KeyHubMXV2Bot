@@ -104,11 +104,13 @@ async def saldo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if c["balance"] <= 0:
-        await update.message.reply_text(texto + "\n\n✅ Estás al corriente.")
-        return
+        texto += "\n\n✅ Estás al corriente."
 
+    # Los datos de pago se muestran siempre, aunque no deba nada: así el
+    # cliente los tiene a la mano cuando quiera abonar o pagar por
+    # adelantado, y no tiene que pedirlos.
     await update.message.reply_text(
-        f"{texto}\n\nPara liquidar:\n{db.datos_pago()}",
+        f"{texto}\n\nPara pagar:\n{db.datos_pago()}",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("📤 Ya te transferí", callback_data="comp:enviar")]]
         ),

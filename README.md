@@ -149,8 +149,10 @@ a la mano: `/nombre 1 Office 2016` hace lo mismo que `/nombre OFF2016 Office 201
 - `/cliente TELEGRAM_ID` — detalle y últimos movimientos de un cliente
 ### Comprobantes de transferencia
 
-Cuando un cliente manda `/saldo` y debe algo, el bot le muestra cuánto debe,
-**tus datos para transferir** y un botón «📤 Ya te transferí». Al tocarlo,
+Cuando un cliente manda `/saldo`, el bot le muestra cuánto debe,
+**tus datos para transferir** y un botón «📤 Ya te transferí». Los datos
+aparecen siempre, aunque no deba nada, para que pueda abonar por adelantado
+sin tener que pedírtelos. Al tocarlo,
 manda la foto del comprobante y a ti te llega con tres botones:
 
 - **✅ Liquidó todo** → borra su saldo completo

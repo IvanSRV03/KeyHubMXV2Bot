@@ -36,14 +36,14 @@ assert "CLABE" in texto and "012180015972489513" in texto, texto
 assert "comp:enviar" in msg.botones()
 print("OK /saldo muestra el saldo, la CLABE y el botón para mandar comprobante")
 
-# --- al corriente: no le enseña la CLABE ni el botón ---
+# --- al corriente: también ve los datos, por si quiere abonar por adelantado ---
 msg_ok = FakeMessage()
 db.ensure_customer(2, "beto", "Beto", status=db.APROBADO)
 correr(customer.saldo_cmd(FakeUpdate(message=msg_ok, user=FakeUser(2, "beto", "Beto")), FakeContext()))
 assert "al corriente" in msg_ok.respuestas[-1]
-assert "CLABE" not in msg_ok.respuestas[-1], "le enseña datos de pago a quien no debe nada"
-assert msg_ok.botones() == []
-print("OK a quien no debe nada no se le enseñan datos de pago")
+assert "CLABE" in msg_ok.respuestas[-1], "no le muestra cómo pagar a quien no debe nada"
+assert "comp:enviar" in msg_ok.botones()
+print("OK con saldo en $0 también se ven los datos de pago y el botón")
 
 # --- 2) el cliente toca el botón y manda la foto ---
 ctx_cli = FakeContext()
