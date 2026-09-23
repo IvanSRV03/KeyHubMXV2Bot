@@ -3,7 +3,7 @@ from telegram.ext import ContextTypes
 
 import db
 import provider_api as api
-from handlers.common import is_admin
+from handlers.common import is_admin, reply_long
 
 # Según lo que confirmaste: C008 = clave válida, C060 = clave no válida.
 # Cualquier otro código se muestra tal cual para que lo revises manualmente,
@@ -42,7 +42,7 @@ async def checkkey_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔑 {r.get('Key')}\n📝 {r.get('Description')}\n⚠️ {code} — {estado}\n⏰ {r.get('Time')}"
         )
     lines.append(f"\nUsadas hoy: {data.get('used')} / {data.get('limit')} (restantes: {data.get('remaining')})")
-    await update.message.reply_text("\n\n".join(lines))
+    await reply_long(update, lines)
 
 
 async def checkredeem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -64,7 +64,7 @@ async def checkredeem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔑 {r.get('Key')}\n📝 {r.get('Description')}\n🎁 {r.get('ErrorCode')}\n⏰ {r.get('Time')}"
         )
     lines.append(f"\nUsadas hoy: {data.get('used')} / {data.get('limit')} (restantes: {data.get('remaining')})")
-    await update.message.reply_text("\n\n".join(lines))
+    await reply_long(update, lines)
 
 
 async def admincid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -217,8 +217,9 @@ async def clientes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = []
     for r in rows:
         nombre = r["username"] or r["first_name"] or str(r["telegram_id"])
-        lines.append(f"@{nombre} (ID {r['telegram_id']}) — ${r['balance']:.2f}")
-    await update.message.reply_text("\n".join(lines))
+        marca = {db.PENDIENTE: "⏳", db.BLOQUEADO: "⛔"}.get(r["status"], "✅")
+        lines.append(f"{marca} @{nombre} (ID {r['telegram_id']}) — ${r['balance']:.2f}")
+    await reply_long(update, lines, header="Clientes")
 
 
 async def cliente_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -260,8 +261,16 @@ async def cobrar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("El ID y el monto deben ser numéricos.")
         return
     concepto = " ".join(context.args[2:]) or "cargo manual"
-    db.add_charge(tid, "charge", {"concepto": concepto}, monto)
-    await update.message.reply_text(f"Se agregó ${monto:.2f} al saldo de {tid} ({concepto}).")
+    if not db.add_charge(tid, "charge", {"concepto": concepto}, monto):
+        await update.message.reply_text(
+            f"❌ No hay ningún cliente con el ID {tid}, así que no se hizo el cargo.\n"
+            "Revisa el ID con /clientes."
+        )
+        return
+    c = db.get_customer(tid)
+    await update.message.reply_text(
+        f"Se agregó ${monto:.2f} al saldo de {tid} ({concepto}). Nuevo saldo: ${c['balance']:.2f}"
+    )
 
 
 async def pagar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -276,10 +285,14 @@ async def pagar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("El ID y el monto deben ser numéricos.")
         return
-    db.add_payment(tid, monto, note="pago registrado por admin")
+    if not db.add_payment(tid, monto, note="pago registrado por admin"):
+        await update.message.reply_text(
+            f"❌ No hay ningún cliente con el ID {tid}, así que no se registró el pago.\n"
+            "Revisa el ID con /clientes."
+        )
+        return
     c = db.get_customer(tid)
-    saldo = c["balance"] if c else 0
-    await update.message.reply_text(f"Pago registrado. Nuevo saldo de {tid}: ${saldo:.2f}")
+    await update.message.reply_text(f"Pago registrado. Nuevo saldo de {tid}: ${c['balance']:.2f}")
 
 
 async def buy_stock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -307,3 +320,178 @@ async def buy_stock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ Compra al proveedor completada.\nOrden: {order_id}\n\n{data.get('data') or data.get('keys')}"
     )
+
+
+# --------------------------------------------------------------------------
+# Control de acceso de clientes
+# --------------------------------------------------------------------------
+
+async def _avisar_cliente(context: ContextTypes.DEFAULT_TYPE, telegram_id: int, texto: str):
+    """Le avisa al cliente de un cambio en su cuenta, sin romperse si bloqueó al bot."""
+    try:
+        await context.bot.send_message(telegram_id, texto)
+        return True
+    except Exception:
+        return False
+
+
+async def pendientes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista las solicitudes de acceso que faltan por resolver."""
+    if not await _guard(update):
+        return
+    rows = db.list_customers(status=db.PENDIENTE)
+    if not rows:
+        await update.message.reply_text("No hay solicitudes pendientes. ✅")
+        return
+    lines = []
+    for r in rows:
+        nombre = r["username"] or r["first_name"] or str(r["telegram_id"])
+        lines.append(f"⏳ @{nombre} (ID {r['telegram_id']}) — desde {r['created_at'][:10]}")
+    lines.append("\nPara aprobar: /aprobar ID    Para rechazar: /bloquear ID")
+    await reply_long(update, lines, header="Solicitudes pendientes")
+
+
+async def aprobar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _guard(update):
+        return
+    if not context.args:
+        await update.message.reply_text("Uso: /aprobar TELEGRAM_ID  (usa /pendientes para ver las solicitudes)")
+        return
+    try:
+        tid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("El ID debe ser numérico.")
+        return
+
+    if not db.set_customer_status(tid, db.APROBADO):
+        await update.message.reply_text(
+            f"No hay ningún cliente con el ID {tid}. Tiene que mandarle /start al bot primero."
+        )
+        return
+
+    avisado = await _avisar_cliente(
+        context,
+        tid,
+        "✅ Tu cuenta fue aprobada. Ya puedes usar el bot:\n"
+        "/productos para ver el catálogo\n"
+        "/comprar CODIGO CANTIDAD para comprar\n"
+        "/cid para obtener un Confirmation ID",
+    )
+    extra = "" if avisado else "\n(No le pude avisar por Telegram — quizá bloqueó al bot.)"
+    await update.message.reply_text(f"Cliente {tid} aprobado.{extra}")
+
+
+async def bloquear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _guard(update):
+        return
+    if not context.args:
+        await update.message.reply_text("Uso: /bloquear TELEGRAM_ID")
+        return
+    try:
+        tid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("El ID debe ser numérico.")
+        return
+
+    if not db.set_customer_status(tid, db.BLOQUEADO):
+        await update.message.reply_text(f"No hay ningún cliente con el ID {tid}.")
+        return
+
+    c = db.get_customer(tid)
+    aviso = ""
+    if c and c["balance"] > 0:
+        aviso = f"\n⚠️ Ojo: ese cliente todavía te debe ${c['balance']:.2f}."
+    await update.message.reply_text(f"Cliente {tid} bloqueado. Ya no puede comprar ni pedir CIDs.{aviso}")
+
+
+async def limite_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fija el límite de crédito de un cliente. 'global' lo regresa al límite general."""
+    if not await _guard(update):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Uso: /limite TELEGRAM_ID MONTO\n"
+            "     /limite TELEGRAM_ID global   → que use el límite general"
+        )
+        return
+    try:
+        tid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("El ID debe ser numérico.")
+        return
+
+    c = db.get_customer(tid)
+    if not c:
+        await update.message.reply_text(f"No hay ningún cliente con el ID {tid}.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            f"Límite actual de {tid}: ${db.effective_credit_limit(c):.2f}"
+            + (" (usa el límite general)" if c["credit_limit"] is None else " (propio)")
+        )
+        return
+
+    valor = context.args[1].lower()
+    if valor in ("global", "general", "default"):
+        db.set_credit_limit(tid, None)
+        await update.message.reply_text(
+            f"Cliente {tid} ahora usa el límite general (${db.get_float_setting('credit_limit_default', db.DEFAULT_CREDIT_LIMIT):.2f})."
+        )
+        return
+
+    try:
+        monto = float(valor)
+    except ValueError:
+        await update.message.reply_text("El monto debe ser un número (o la palabra 'global').")
+        return
+    if monto < 0:
+        await update.message.reply_text("El límite no puede ser negativo.")
+        return
+
+    db.set_credit_limit(tid, monto)
+    await update.message.reply_text(f"Límite de crédito de {tid} → ${monto:.2f}")
+
+
+async def limite_global_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Límite de crédito que aplica a los clientes que no tienen uno propio."""
+    if not await _guard(update):
+        return
+    actual = db.get_float_setting("credit_limit_default", db.DEFAULT_CREDIT_LIMIT)
+    if not context.args:
+        await update.message.reply_text(
+            f"Límite de crédito general: ${actual:.2f}\nUso: /limiteglobal MONTO"
+        )
+        return
+    try:
+        monto = float(context.args[0])
+    except ValueError:
+        await update.message.reply_text("El monto debe ser un número.")
+        return
+    if monto < 0:
+        await update.message.reply_text("El límite no puede ser negativo.")
+        return
+    db.set_setting("credit_limit_default", monto)
+    await update.message.reply_text(f"Límite de crédito general → ${monto:.2f}")
+
+
+async def max_cantidad_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tope de unidades que un cliente puede pedir en una sola compra."""
+    if not await _guard(update):
+        return
+    actual = db.get_int_setting("max_qty", db.DEFAULT_MAX_QTY)
+    if not context.args:
+        await update.message.reply_text(
+            f"Máximo de unidades por compra: {actual}\nUso: /maxcantidad NUMERO"
+        )
+        return
+    try:
+        n = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Tiene que ser un número entero.")
+        return
+    if n < 1:
+        await update.message.reply_text("El máximo tiene que ser al menos 1.")
+        return
+    db.set_setting("max_qty", n)
+    await update.message.reply_text(f"Máximo por compra → {n} unidades")

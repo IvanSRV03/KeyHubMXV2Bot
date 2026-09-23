@@ -5,6 +5,17 @@ from contextlib import contextmanager
 
 from config import DB_PATH
 
+# Estados posibles de un cliente.
+PENDIENTE = "pendiente"
+APROBADO = "aprobado"
+BLOQUEADO = "bloqueado"
+
+# Valores por defecto de los ajustes globales, usados cuando el admin todavia
+# no los configuro. Son conservadores a proposito: mas vale que el bot diga
+# "no" de mas y el admin lo suba, a que alguien compre de mas a tu costo.
+DEFAULT_CREDIT_LIMIT = 1000.0
+DEFAULT_MAX_QTY = 5
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -12,7 +23,9 @@ def _now() -> str:
 
 @contextmanager
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    # timeout: si otra escritura tiene la base tomada, espera en vez de
+    # reventar con "database is locked".
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -23,6 +36,7 @@ def get_conn():
 
 def init_db():
     with get_conn() as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS customers (
@@ -52,25 +66,54 @@ def init_db():
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+            CREATE INDEX IF NOT EXISTS idx_tx_customer ON transactions (telegram_id, id DESC);
             """
         )
+        _migrate(conn)
 
 
-def ensure_customer(telegram_id: int, username: str, first_name: str):
+def _migrate(conn):
+    """Agrega columnas nuevas a bases que ya existian, sin perder datos."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(customers)")}
+
+    if "status" not in cols:
+        conn.execute("ALTER TABLE customers ADD COLUMN status TEXT")
+        # Los clientes que ya existian venian de la version sin control de
+        # acceso: si les dejaramos 'pendiente' dejarian de poder comprar de
+        # golpe, asi que se respetan como aprobados.
+        conn.execute("UPDATE customers SET status=?", (APROBADO,))
+
+    if "credit_limit" not in cols:
+        # NULL = usa el limite global configurado en settings.
+        conn.execute("ALTER TABLE customers ADD COLUMN credit_limit REAL")
+
+
+# --------------------------------------------------------------------------
+# Clientes
+# --------------------------------------------------------------------------
+
+def ensure_customer(telegram_id: int, username: str, first_name: str, status: str = PENDIENTE):
+    """Da de alta al cliente si no existe. Devuelve True si es nuevo.
+
+    A un cliente que ya existe solo se le refrescan nombre y username: su
+    estado nunca se toca aqui, para no re-aprobar a alguien bloqueado.
+    """
     with get_conn() as conn:
         row = conn.execute(
             "SELECT telegram_id FROM customers WHERE telegram_id=?", (telegram_id,)
         ).fetchone()
         if row is None:
             conn.execute(
-                "INSERT INTO customers (telegram_id, username, first_name, balance, created_at) VALUES (?,?,?,0,?)",
-                (telegram_id, username, first_name, _now()),
+                "INSERT INTO customers (telegram_id, username, first_name, balance, created_at, status)"
+                " VALUES (?,?,?,0,?,?)",
+                (telegram_id, username, first_name, _now(), status),
             )
-        else:
-            conn.execute(
-                "UPDATE customers SET username=?, first_name=? WHERE telegram_id=?",
-                (username, first_name, telegram_id),
-            )
+            return True
+        conn.execute(
+            "UPDATE customers SET username=?, first_name=? WHERE telegram_id=?",
+            (username, first_name, telegram_id),
+        )
+        return False
 
 
 def get_customer(telegram_id: int):
@@ -80,14 +123,56 @@ def get_customer(telegram_id: int):
         ).fetchone()
 
 
-def list_customers():
+def list_customers(status: str = None):
     with get_conn() as conn:
+        if status:
+            return conn.execute(
+                "SELECT * FROM customers WHERE status=? ORDER BY balance DESC", (status,)
+            ).fetchall()
         return conn.execute("SELECT * FROM customers ORDER BY balance DESC").fetchall()
 
 
-def add_charge(telegram_id: int, type_: str, detail: dict, amount: float):
-    """amount positivo = cargo (aumenta lo que debe el cliente); negativo = abono."""
+def set_customer_status(telegram_id: int, status: str) -> bool:
+    """Devuelve False si ese cliente no existe."""
     with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE customers SET status=? WHERE telegram_id=?", (status, telegram_id)
+        )
+        return cur.rowcount > 0
+
+
+def set_credit_limit(telegram_id: int, limit) -> bool:
+    """limit=None hace que el cliente use el limite global."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE customers SET credit_limit=? WHERE telegram_id=?", (limit, telegram_id)
+        )
+        return cur.rowcount > 0
+
+
+def effective_credit_limit(customer) -> float:
+    """El limite del cliente, o el global si no tiene uno propio."""
+    if customer is not None and customer["credit_limit"] is not None:
+        return float(customer["credit_limit"])
+    return get_float_setting("credit_limit_default", DEFAULT_CREDIT_LIMIT)
+
+
+# --------------------------------------------------------------------------
+# Movimientos
+# --------------------------------------------------------------------------
+
+def add_charge(telegram_id: int, type_: str, detail: dict, amount: float) -> bool:
+    """amount positivo = cargo (aumenta lo que debe el cliente); negativo = abono.
+
+    Devuelve False (sin escribir nada) si ese cliente no existe, para que el
+    cargo no quede huerfano con el saldo sin actualizar.
+    """
+    with get_conn() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM customers WHERE telegram_id=?", (telegram_id,)
+        ).fetchone()
+        if not exists:
+            return False
         conn.execute(
             "INSERT INTO transactions (telegram_id, type, detail, amount, created_at) VALUES (?,?,?,?,?)",
             (telegram_id, type_, json.dumps(detail, ensure_ascii=False, default=str), amount, _now()),
@@ -96,10 +181,11 @@ def add_charge(telegram_id: int, type_: str, detail: dict, amount: float):
             "UPDATE customers SET balance = balance + ? WHERE telegram_id=?",
             (amount, telegram_id),
         )
+        return True
 
 
-def add_payment(telegram_id: int, amount: float, note: str = ""):
-    add_charge(telegram_id, "payment", {"note": note}, -abs(amount))
+def add_payment(telegram_id: int, amount: float, note: str = "") -> bool:
+    return add_charge(telegram_id, "payment", {"note": note}, -abs(amount))
 
 
 def get_history(telegram_id: int, limit: int = 10):
@@ -109,6 +195,10 @@ def get_history(telegram_id: int, limit: int = 10):
             (telegram_id, limit),
         ).fetchall()
 
+
+# --------------------------------------------------------------------------
+# Productos
+# --------------------------------------------------------------------------
 
 def upsert_product(code: str, name: str, category: str, cost: float, price=None):
     with get_conn() as conn:
@@ -139,6 +229,10 @@ def get_product(code: str):
         return conn.execute("SELECT * FROM products WHERE code=?", (code,)).fetchone()
 
 
+# --------------------------------------------------------------------------
+# Ajustes
+# --------------------------------------------------------------------------
+
 def set_setting(key: str, value):
     with get_conn() as conn:
         conn.execute(
@@ -151,3 +245,18 @@ def get_setting(key: str, default=None):
     with get_conn() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return row["value"] if row else default
+
+
+def get_float_setting(key: str, default: float) -> float:
+    """Lee un ajuste numerico sin tronar si quedo guardado algo raro."""
+    try:
+        return float(get_setting(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def get_int_setting(key: str, default: int) -> int:
+    try:
+        return int(float(get_setting(key, default)))
+    except (TypeError, ValueError):
+        return default

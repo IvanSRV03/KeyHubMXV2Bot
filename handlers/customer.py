@@ -8,6 +8,9 @@ from telegram.ext import ContextTypes
 import db
 import provider_api as api
 import ocr
+from handlers.common import require_approved, reply_long, notify_admins, is_admin
+
+logger = logging.getLogger(__name__)
 
 WELCOME = (
     "👋 Bienvenido.\n\n"
@@ -19,11 +22,40 @@ WELCOME = (
     "/historial - ver tus últimos movimientos\n"
 )
 
+PENDIENTE_MSG = (
+    "👋 Hola. Ya registré tu solicitud.\n\n"
+    "Este bot funciona con clientes autorizados, así que el administrador tiene "
+    "que aprobarte antes de que puedas comprar. Te aviso en cuanto estés dado de alta."
+)
+
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    db.ensure_customer(user.id, user.username, user.first_name)
-    await update.message.reply_text(WELCOME)
+
+    if is_admin(user.id):
+        db.ensure_customer(user.id, user.username, user.first_name, status=db.APROBADO)
+        await update.message.reply_text(WELCOME + "\nEres administrador: usa /help para tus comandos.")
+        return
+
+    nuevo = db.ensure_customer(user.id, user.username, user.first_name)
+    customer = db.get_customer(user.id)
+
+    if nuevo:
+        etiqueta = f"@{user.username}" if user.username else (user.first_name or "sin nombre")
+        await notify_admins(
+            context,
+            "🆕 Nueva solicitud de acceso\n"
+            f"{etiqueta} (ID {user.id})\n\n"
+            f"Para darle acceso: /aprobar {user.id}\n"
+            f"Para ignorarlo: /bloquear {user.id}",
+        )
+
+    if customer["status"] == db.APROBADO:
+        await update.message.reply_text(WELCOME)
+    elif customer["status"] == db.BLOQUEADO:
+        await update.message.reply_text("⛔ Tu acceso está suspendido.")
+    else:
+        await update.message.reply_text(PENDIENTE_MSG)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -34,7 +66,12 @@ async def saldo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db.ensure_customer(user.id, user.username, user.first_name)
     c = db.get_customer(user.id)
-    await update.message.reply_text(f"💰 Tu saldo pendiente es: ${c['balance']:.2f}")
+    limite = db.effective_credit_limit(c)
+    disponible = max(limite - c["balance"], 0)
+    await update.message.reply_text(
+        f"💰 Tu saldo pendiente es: ${c['balance']:.2f}\n"
+        f"🧾 Límite de crédito: ${limite:.2f} (disponible: ${disponible:.2f})"
+    )
 
 
 async def historial_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -45,7 +82,6 @@ async def historial_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = []
     for r in rows:
-        detail = json.loads(r["detail"]) if r["detail"] else {}
         etiqueta = {
             "buy_key": "Compra de clave",
             "get_cid": "Confirmation ID",
@@ -53,10 +89,13 @@ async def historial_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "payment": "Pago",
         }.get(r["type"], r["type"])
         lines.append(f"{r['created_at'][:19]} — {etiqueta} — ${r['amount']:.2f}")
-    await update.message.reply_text("\n".join(lines))
+    await reply_long(update, lines)
 
 
 async def productos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_approved(update, context):
+        return
+
     rows = db.list_products()
     by_cat = {}
     for r in rows:
@@ -74,12 +113,13 @@ async def productos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for it in items:
             lines.append(f"  {it['code']} — {it['name']} — ${it['price']:.2f}")
     lines.append("\nPara comprar: /comprar CODIGO CANTIDAD")
-    await update.message.reply_text("\n".join(lines))
+    await reply_long(update, lines)
 
 
 async def comprar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    db.ensure_customer(user.id, user.username, user.first_name)
+    customer = await require_approved(update, context)
+    if not customer:
+        return
 
     if len(context.args) < 2:
         await update.message.reply_text(
@@ -90,9 +130,18 @@ async def comprar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code, qty_str = context.args[0], context.args[1]
     try:
         qty = int(qty_str)
-        assert qty > 0
-    except (ValueError, AssertionError):
+    except ValueError:
         await update.message.reply_text("La cantidad debe ser un número entero mayor a 0.")
+        return
+    if qty <= 0:
+        await update.message.reply_text("La cantidad debe ser un número entero mayor a 0.")
+        return
+
+    max_qty = db.get_int_setting("max_qty", db.DEFAULT_MAX_QTY)
+    if qty > max_qty:
+        await update.message.reply_text(
+            f"⚠️ El máximo por compra es {max_qty} unidades. Si necesitas más, pídeselo al administrador."
+        )
         return
 
     product = db.get_product(code)
@@ -101,6 +150,11 @@ async def comprar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     total = product["price"] * qty
+    ok, aviso = _cabe_en_el_credito(customer, total)
+    if not ok:
+        await update.message.reply_text(aviso)
+        return
+
     keyboard = InlineKeyboardMarkup(
         [
             [
@@ -116,6 +170,22 @@ async def comprar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _cabe_en_el_credito(customer, monto: float):
+    """Revisa que el cargo no pase el limite de credito del cliente."""
+    limite = db.effective_credit_limit(customer)
+    nuevo_saldo = customer["balance"] + monto
+    if nuevo_saldo > limite:
+        disponible = max(limite - customer["balance"], 0)
+        return False, (
+            f"⚠️ Ese cargo de ${monto:.2f} pasa tu límite de crédito.\n\n"
+            f"Saldo pendiente: ${customer['balance']:.2f}\n"
+            f"Límite: ${limite:.2f}\n"
+            f"Disponible: ${disponible:.2f}\n\n"
+            "Liquida lo que debes o pídele al administrador que te suba el límite."
+        )
+    return True, ""
+
+
 async def buy_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -125,11 +195,23 @@ async def buy_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("Compra cancelada.")
         return
 
+    customer = await require_approved(update, context)
+    if not customer:
+        return
+
     _, code, qty_str = query.data.split(":")
     qty = int(qty_str)
     product = db.get_product(code)
     if not product or product["price"] is None:
         await query.edit_message_text("Ese producto ya no está disponible.")
+        return
+
+    total = product["price"] * qty
+    # Se vuelve a revisar el credito con el saldo de este momento: entre que se
+    # mostro el boton y se presiono, el cliente pudo haber hecho otros cargos.
+    ok, aviso = _cabe_en_el_credito(customer, total)
+    if not ok:
+        await query.edit_message_text(aviso)
         return
 
     order_id = api.make_order_id()
@@ -144,7 +226,6 @@ async def buy_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     keys = data.get("keys") or data.get("data")
-    total = product["price"] * qty
     db.add_charge(
         user.id,
         "buy_key",
@@ -154,11 +235,16 @@ async def buy_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text(
         f"✅ Compra realizada.\n\n{keys}\n\n💰 Se agregaron ${total:.2f} a tu cuenta pendiente."
     )
+    await notify_admins(
+        context,
+        f"🛒 Venta\nCliente: @{user.username or user.first_name} (ID {user.id})\n"
+        f"Producto: {code} x{qty}\nTotal: ${total:.2f}\nOrden: {order_id}",
+    )
 
 
 async def cid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    db.ensure_customer(user.id, user.username, user.first_name)
+    if not await require_approved(update, context):
+        return
 
     if context.args:
         iid = " ".join(context.args)
@@ -195,7 +281,7 @@ async def generic_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
     except Exception as e:
-        logging.exception("Error procesando la foto del Installation ID")
+        logger.exception("Error procesando la foto del Installation ID")
         await update.message.reply_text(
             f"❌ Hubo un problema leyendo la foto ({e}).\n"
             "Por favor escribe tu Installation ID directamente, así: /cid 123456-123456-123456-..."
@@ -215,31 +301,50 @@ async def generic_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def _process_cid(update: Update, context: ContextTypes.DEFAULT_TYPE, iid: str, already_announced=False):
+    customer = await require_approved(update, context)
+    if not customer:
+        return
     user = update.effective_user
+    message = update.effective_message
+
     # El proveedor cuenta caracteres literales (debe ser exactamente 54 o 63),
     # así que le mandamos solo los dígitos, sin guiones ni espacios que el
     # usuario o el OCR hayan puesto para que se vea legible.
     iid_clean = re.sub(r"\D", "", iid)
 
     if len(iid_clean) not in (54, 63):
-        await update.message.reply_text(
+        await message.reply_text(
             f"⚠️ Ese Installation ID tiene {len(iid_clean)} dígitos, pero debe tener exactamente "
             f"54 o 63. Revísalo y vuelve a mandarlo con /cid NUMERO (puedes escribirlo con o sin guiones)."
         )
         return
 
+    price = db.get_float_setting("cid_price", 0.0)
+    if price > 0:
+        ok, aviso = _cabe_en_el_credito(customer, price)
+        if not ok:
+            await message.reply_text(aviso)
+            return
+
     if not already_announced:
-        await update.message.reply_text("⏳ Consultando tu Confirmation ID...")
+        await message.reply_text("⏳ Consultando tu Confirmation ID...")
 
     try:
         data = api.get_cid(iid_clean)
     except api.ProviderError as e:
-        await update.message.reply_text(f"❌ No se pudo obtener el CID: {e}")
+        await message.reply_text(f"❌ No se pudo obtener el CID: {e}")
         return
 
     cid = data.get("data")
-    price = float(db.get_setting("cid_price", "0") or 0)
+    if not cid:
+        # Sin CID no hay servicio prestado, asi que tampoco hay cargo.
+        await message.reply_text(
+            "❌ El proveedor no devolvió un Confirmation ID. No se te hizo ningún cargo. "
+            "Vuelve a intentarlo en un momento."
+        )
+        return
+
     db.add_charge(user.id, "get_cid", {"iid": iid_clean, "cid": cid}, price)
 
     extra = f"\n\n💰 Se agregaron ${price:.2f} a tu cuenta pendiente." if price > 0 else ""
-    await update.message.reply_text(f"🆔 Tu Confirmation ID es:\n\n{cid}{extra}")
+    await message.reply_text(f"🆔 Tu Confirmation ID es:\n\n{cid}{extra}")

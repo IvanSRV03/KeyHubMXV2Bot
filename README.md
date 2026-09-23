@@ -100,6 +100,30 @@ clientes por cada producto y por cada Confirmation ID.
 - `/cobrar TELEGRAM_ID MONTO concepto` — agrega un cargo manual
 - `/pagar TELEGRAM_ID MONTO` — registra que el cliente te pagó (baja su saldo)
 
+### Control de acceso (quién puede comprarte)
+
+El bot **no le vende a cualquiera**. Cuando alguien nuevo manda `/start`, queda
+en estado *pendiente* y no puede comprar ni pedir CIDs hasta que tú lo
+apruebes. A ti te llega un aviso por Telegram con su ID.
+
+- `/pendientes` — solicitudes de acceso sin resolver
+- `/aprobar TELEGRAM_ID` — le das acceso (y el bot le avisa)
+- `/bloquear TELEGRAM_ID` — le quitas el acceso (te advierte si aún te debe)
+
+### Límites de crédito
+
+Como el bot le compra la clave al proveedor **con tu dinero** y solo le suma la
+deuda al cliente, cada cliente tiene un tope de cuánto puede deber.
+
+- `/limiteglobal MONTO` — tope que aplica a todos por defecto (arranca en $1000)
+- `/limite TELEGRAM_ID MONTO` — tope propio para un cliente de confianza
+- `/limite TELEGRAM_ID global` — lo regresa al tope general
+- `/maxcantidad NUMERO` — máximo de unidades por compra (arranca en 5)
+
+Si una compra hace que el cliente pase su límite, el bot la rechaza y le dice
+cuánto tiene disponible. El límite se revisa dos veces: al pedir la compra y
+otra vez al confirmarla.
+
 ## 7. Notas importantes
 
 - **Lectura de fotos del Installation ID (OCR):** el bot usa `pytesseract`
@@ -109,6 +133,9 @@ clientes por cada producto y por cada Confirmation ID.
   Installation ID directamente con `/cid NUMERO`. Si en la práctica falla
   seguido, dímelo y podemos cambiar a un servicio de OCR más robusto (con
   costo por imagen) o quitar la opción de foto y dejar solo texto.
+- **Clientes existentes:** si ya tenías clientes antes de que existiera el
+  control de acceso, la migración los marca como **aprobados** para que no se
+  queden fuera de golpe. Los que lleguen después entran como *pendientes*.
 - **Base de datos:** es SQLite guardado en el archivo que definas en
   `DB_PATH`. Con el Volume de Railway persiste entre despliegues. Si tu
   volumen de clientes crece mucho y quieres algo más robusto (Postgres),
