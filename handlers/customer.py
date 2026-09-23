@@ -416,42 +416,98 @@ async def generic_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await _registrar_reposicion(update, context, update.message.text)
         return
 
+    # Si pegan un Installation ID sin mandar /cid antes, se entiende igual.
+    digitos = re.sub(r"\D", "", update.message.text or "")
+    if len(digitos) in (54, 63):
+        await _process_cid(update, context, digitos)
+
 
 async def generic_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("awaiting_iid"):
+    """Cualquier foto de un cliente aprobado se intenta leer como Installation ID.
+
+    Antes había que mandar /cid primero y luego la foto; en la práctica el
+    cliente manda la foto y ya. Ahora eso funciona.
+    """
+    customer = await require_approved(update, context)
+    if not customer:
         return
-    context.user_data["awaiting_iid"] = False
+    context.user_data.pop("awaiting_iid", None)
+
+    aviso = await update.message.reply_text("🔍 Leyendo la foto...")
 
     try:
         photo = update.message.photo[-1]
         file = await photo.get_file()
         image_bytes = await file.download_as_bytearray()
-        # El OCR tambien es bloqueante (puede tardar segundos con una foto
-        # grande), asi que se va a un hilo para no congelar al bot.
+        # El OCR es bloqueante y puede tardar segundos con una foto grande,
+        # así que se va a un hilo para no congelar al bot.
         iid = await asyncio.to_thread(ocr.extract_installation_id, bytes(image_bytes))
     except ocr.OcrUnavailable:
-        await update.message.reply_text(
-            "⚠️ Todavía no puedo leer fotos en este servidor (falta configurar el lector de texto).\n"
-            "Por favor escribe tu Installation ID directamente, así: /cid 123456-123456-123456-..."
+        await aviso.edit_text(
+            "⚠️ No puedo leer fotos en este servidor (falta el lector de texto).\n"
+            "Mándame el Installation ID escrito y listo."
         )
         return
     except Exception as e:
         logger.exception("Error procesando la foto del Installation ID")
-        await update.message.reply_text(
+        await aviso.edit_text(
             f"❌ Hubo un problema leyendo la foto ({e}).\n"
-            "Por favor escribe tu Installation ID directamente, así: /cid 123456-123456-123456-..."
+            "Mándame el Installation ID escrito y listo."
         )
         return
 
     if not iid:
-        await update.message.reply_text(
-            "No pude leer bien el Installation ID en la foto. Por favor escríbelo directamente con /cid NUMERO."
+        await aviso.edit_text(
+            "😕 No pude leer los números en esa foto.\n\n"
+            "Puedes mandar otra foto (de frente, sin sombra encima y que se "
+            "vean los 9 grupos completos), o escribirme el Installation ID."
         )
         return
 
-    await update.message.reply_text(
-        f"Leí este Installation ID de la foto — revisa que esté correcto:\n{iid}\n\nBuscando tu Confirmation ID..."
+    digitos = re.sub(r"\D", "", iid)
+    if len(digitos) not in (54, 63):
+        # No se manda al proveedor una lectura incompleta: cada consulta gasta
+        # cupo y de todos modos la rechazaría.
+        await aviso.edit_text(
+            f"😕 Leí algo, pero incompleto ({len(digitos)} dígitos de 54 o 63):\n\n"
+            f"{iid}\n\n"
+            "Manda otra foto más clara, o escríbeme el Installation ID."
+        )
+        return
+
+    context.user_data["iid_leido"] = digitos
+    await aviso.edit_text(
+        f"Leí esto de la foto:\n\n{iid}\n\n¿Está bien?",
+        reply_markup=InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton("✅ Sí, es correcto", callback_data="cid:ok"),
+                InlineKeyboardButton("✏️ Lo escribo yo", callback_data="cid:no"),
+            ]]
+        ),
     )
+
+
+async def cid_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """El cliente confirma (o corrige) lo que se leyó de la foto."""
+    query = update.callback_query
+    await query.answer()
+    if not await require_approved(update, context):
+        return
+
+    if query.data == "cid:no":
+        context.user_data.pop("iid_leido", None)
+        context.user_data["awaiting_iid"] = True
+        await query.edit_message_text(
+            "Va. Escríbeme el Installation ID (con guiones o sin ellos, como te sea más fácil)."
+        )
+        return
+
+    iid = context.user_data.pop("iid_leido", None)
+    if not iid:
+        await query.edit_message_text("Se me perdió el número. Mándame la foto otra vez, por favor.")
+        return
+
+    await query.edit_message_text("⏳ Consultando tu Confirmation ID...")
     await _process_cid(update, context, iid, already_announced=True)
 
 

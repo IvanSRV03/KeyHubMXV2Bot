@@ -16,6 +16,13 @@ class FakeMessage:
         self.teclados.append(reply_markup)
         return self
 
+    async def edit_text(self, texto, reply_markup=None, **kw):
+        """En python-telegram-bot, reply_text() devuelve un Message que se
+        puede editar después. Aquí se guarda igual que una respuesta más."""
+        self.respuestas.append(texto)
+        self.teclados.append(reply_markup)
+        return self
+
     def botones(self):
         """Todos los callback_data de los botones que se enviaron."""
         datos = []

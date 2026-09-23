@@ -182,16 +182,25 @@ otra vez al confirmarla.
 
 ## 7. Notas importantes
 
-- **Lectura de fotos del Installation ID (OCR):** el bot usa `pytesseract`
-  para leer los números de la foto. Es un método heurístico — funciona bien
-  con fotos claras y derechas, pero puede fallar con fotos borrosas, con
-  brillo o en ángulo. Si falla, el bot le pide al cliente que escriba el
-  Installation ID directamente con `/cid NUMERO`. Si en la práctica falla
-  seguido, dímelo y podemos cambiar a un servicio de OCR más robusto (con
-  costo por imagen) o quitar la opción de foto y dejar solo texto.
-- **Clientes existentes:** si ya tenías clientes antes de que existiera el
-  control de acceso, la migración los marca como **aprobados** para que no se
-  queden fuera de golpe. Los que lleguen después entran como *pendientes*.
+- **Lectura de fotos del Installation ID:** el proveedor **no recibe
+  imágenes** — sus tres endpoints (`get-cid`, `check-keys`, `redeem-keys`)
+  esperan texto. Convertir la foto en dígitos es trabajo del bot, y es la
+  parte frágil del flujo.
+
+  El lector prueba la foto en varias versiones (más grande, con contraste,
+  con la iluminación emparejada para quitar sombras, invertida por si la
+  pantalla está en modo oscuro) y se queda con la primera lectura que forme
+  un ID válido de 54 o 63 dígitos. Medido contra pantallas de prueba, pasó
+  de leer 4 de 13 a 11 de 13; falla todavía con fotos muy en ángulo o muy
+  movidas.
+
+  Por eso **nunca manda al proveedor una lectura dudosa**: le muestra al
+  cliente lo que leyó y le pide confirmar con un botón. Si la lectura salió
+  incompleta, le pide otra foto en vez de gastar una consulta del cupo.
+
+  El cliente ya no necesita mandar `/cid` antes: puede mandar la foto de una,
+  o pegar el Installation ID escrito y el bot lo reconoce solo.
+
 - **Base de datos:** es SQLite guardado en el archivo que definas en
   `DB_PATH`. Con el Volume de Railway persiste entre despliegues. Si tu
   volumen de clientes crece mucho y quieres algo más robusto (Postgres),

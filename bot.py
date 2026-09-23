@@ -96,6 +96,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin.reposicion_resolver_callback, pattern=r"^repo(ok|no):"))
     app.add_handler(CallbackQueryHandler(admin.pagar_callback, pattern=r"^pay:"))
     app.add_handler(CallbackQueryHandler(admin.cobrar_callback, pattern=r"^chg:"))
+    app.add_handler(CallbackQueryHandler(customer.cid_confirm_callback, pattern=r"^cid:"))
 
     # Atajos numericos: el cliente manda /1, /2, ... para comprar directo.
     # Va como MessageHandler porque los numeros de producto son dinamicos.
