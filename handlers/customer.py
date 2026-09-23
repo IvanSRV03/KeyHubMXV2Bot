@@ -1,4 +1,4 @@
-import json
+import asyncio
 import logging
 import re
 
@@ -170,6 +170,26 @@ async def comprar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _formatear_claves(keys) -> str:
+    """El proveedor no siempre devuelve las claves en el mismo formato, asi que
+    se normaliza a algo legible en vez de volcarle un dict crudo al cliente."""
+    if keys is None:
+        return "(el proveedor no devolvió claves — avisa al administrador)"
+    if isinstance(keys, str):
+        return keys
+    if isinstance(keys, list):
+        partes = []
+        for k in keys:
+            if isinstance(k, dict):
+                partes.append(str(k.get("key") or k.get("Key") or k))
+            else:
+                partes.append(str(k))
+        return "\n".join(f"🔑 {p}" for p in partes)
+    if isinstance(keys, dict):
+        return str(keys.get("key") or keys.get("Key") or keys)
+    return str(keys)
+
+
 def _cabe_en_el_credito(customer, monto: float):
     """Revisa que el cargo no pase el limite de credito del cliente."""
     limite = db.effective_credit_limit(customer)
@@ -195,6 +215,16 @@ async def buy_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("Compra cancelada.")
         return
 
+    # Anti doble clic: dos toques rapidos al mismo boton llegan como dos
+    # updates, y antes se procesaban ambos, cobrandole la compra dos veces
+    # al cliente. El id del mensaje identifica a ese boton en concreto.
+    procesadas = context.user_data.setdefault("compras_procesadas", set())
+    msg_id = query.message.message_id
+    if msg_id in procesadas:
+        await query.answer("Esa compra ya se está procesando.", show_alert=True)
+        return
+    procesadas.add(msg_id)
+
     customer = await require_approved(update, context)
     if not customer:
         return
@@ -215,25 +245,47 @@ async def buy_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     order_id = api.make_order_id()
+    # La orden se registra ANTES de llamar al proveedor: si la llamada se
+    # cuelga o el bot se reinicia a media compra, queda el rastro para
+    # poder revisarla despues con /orden.
+    db.create_order(order_id, user.id, code, qty, total)
+
     await query.edit_message_text("⏳ Procesando tu compra con el proveedor, un momento...")
     try:
-        data = api.buy_key(code, qty, order_id)
+        data = await api.a_buy_key(code, qty, order_id)
     except api.ProviderError as e:
+        # Un error aqui NO garantiza que el proveedor no haya surtido las
+        # claves (puede ser un timeout con la compra ya hecha de su lado),
+        # asi que la orden queda pendiente de revision y no se cobra nada.
+        db.update_order(order_id, db.ORDEN_PENDIENTE, error=str(e), charged=False)
         await query.edit_message_text(
             f"❌ Hubo un problema al procesar la compra: {e}\n\n"
-            f"Guarda este número de orden por si el administrador necesita revisarla: {order_id}"
+            f"No se te hizo ningún cargo. El administrador ya fue avisado.\n"
+            f"Número de orden: {order_id}"
+        )
+        await notify_admins(
+            context,
+            f"⚠️ Orden sin confirmar\n"
+            f"Cliente: @{user.username or user.first_name} (ID {user.id})\n"
+            f"Producto: {code} x{qty} — ${total:.2f}\n"
+            f"Orden: {order_id}\nError: {e}\n\n"
+            f"El proveedor pudo haberla surtido de todos modos. "
+            f"Revísala con /orden {order_id}",
         )
         return
 
     keys = data.get("keys") or data.get("data")
-    db.add_charge(
+    cobrado = db.add_charge(
         user.id,
         "buy_key",
         {"code": code, "qty": qty, "order_id": order_id, "keys": keys},
         total,
     )
+    db.update_order(order_id, db.ORDEN_COMPLETADA, keys=keys, charged=cobrado)
+
     await query.edit_message_text(
-        f"✅ Compra realizada.\n\n{keys}\n\n💰 Se agregaron ${total:.2f} a tu cuenta pendiente."
+        f"✅ Compra realizada.\n\n{_formatear_claves(keys)}\n\n"
+        f"💰 Se agregaron ${total:.2f} a tu cuenta pendiente."
     )
     await notify_admins(
         context,
@@ -273,7 +325,9 @@ async def generic_photo_handler(update: Update, context: ContextTypes.DEFAULT_TY
         photo = update.message.photo[-1]
         file = await photo.get_file()
         image_bytes = await file.download_as_bytearray()
-        iid = ocr.extract_installation_id(bytes(image_bytes))
+        # El OCR tambien es bloqueante (puede tardar segundos con una foto
+        # grande), asi que se va a un hilo para no congelar al bot.
+        iid = await asyncio.to_thread(ocr.extract_installation_id, bytes(image_bytes))
     except ocr.OcrUnavailable:
         await update.message.reply_text(
             "⚠️ Todavía no puedo leer fotos en este servidor (falta configurar el lector de texto).\n"
@@ -330,7 +384,7 @@ async def _process_cid(update: Update, context: ContextTypes.DEFAULT_TYPE, iid: 
         await message.reply_text("⏳ Consultando tu Confirmation ID...")
 
     try:
-        data = api.get_cid(iid_clean)
+        data = await api.a_get_cid(iid_clean)
     except api.ProviderError as e:
         await message.reply_text(f"❌ No se pudo obtener el CID: {e}")
         return

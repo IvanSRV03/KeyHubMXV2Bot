@@ -110,6 +110,20 @@ apruebes. A ti te llega un aviso por Telegram con su ID.
 - `/aprobar TELEGRAM_ID` — le das acceso (y el bot le avisa)
 - `/bloquear TELEGRAM_ID` — le quitas el acceso (te advierte si aún te debe)
 
+### Órdenes al proveedor
+
+Cada compra se registra **antes** de llamar al proveedor, así que si la
+llamada se cuelga (su documentación dice que puede tardar hasta 900s) la
+orden no se pierde.
+
+- `/ordenes` — órdenes que quedaron sin confirmar
+- `/ordenes todas` — las últimas 30, en cualquier estado
+- `/orden ORDER_ID` — le pregunta al proveedor qué pasó con esa orden
+
+Cuando una compra falla, al cliente **no se le cobra** y a ti te llega un
+aviso. Si después resulta que el proveedor sí la surtió, `/orden` te lo dice
+y te deja listo el `/cobrar` para cobrárselo tú.
+
 ### Límites de crédito
 
 Como el bot le compra la clave al proveedor **con tu dinero** y solo le suma la
@@ -145,20 +159,21 @@ otra vez al confirmarla.
   le suma el cargo a su cuenta pendiente. Asegúrate de que los precios que
   configures con `/precio` ya incluyan tu margen sobre el costo del
   proveedor.
-- **Timeout del proveedor:** según su documentación, si una compra se queda
-  "colgada", el proveedor puede tardar hasta 900 segundos en resolverla. Si
-  eso pasa, el bot te muestra el `orderId` generado; puedo agregar un
-  comando para consultar órdenes pendientes (`buy-key/order`) si te
-  encuentras con este caso seguido.
+- **Timeout del proveedor:** si una compra se queda "colgada", el proveedor
+  puede tardar hasta 900 segundos en resolverla. El bot ya no se queda
+  congelado mientras tanto (las llamadas corren en un hilo aparte) y la
+  orden queda guardada para consultarla con `/orden`.
 
-## 8. Correrlo en tu computadora antes de subirlo (opcional)
+## 9. Pruebas antes de desplegar
+
+Railway despliega solo en cuanto cambia `main`, así que conviene correr las
+pruebas antes de hacer merge:
 
 ```bash
-python -m venv venv
-source venv/bin/activate  # en Windows: venv\Scripts\activate
-pip install -r requirements.txt
-# instala tesseract-ocr en tu sistema (en Mac: brew install tesseract)
-cp .env.example .env  # y llena los valores
-export $(cat .env | xargs)  # en Windows usa otra forma de cargar variables
-python bot.py
+python tests/correr_todas.py
 ```
+
+No tocan la red ni la base de producción: usan un proveedor simulado y una
+base temporal. Cubren la migración de la base, el flujo de compra (doble
+clic, proveedor caído, límite de crédito) y que la app arranque con todos
+sus handlers.

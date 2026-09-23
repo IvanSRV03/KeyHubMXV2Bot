@@ -29,7 +29,7 @@ async def checkkey_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     keys = ",".join(context.args)
     try:
-        data = api.check_keys(keys)
+        data = await api.a_check_keys(keys)
     except api.ProviderError as e:
         await update.message.reply_text(f"❌ {e}")
         return
@@ -53,7 +53,7 @@ async def checkredeem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     keys = ",".join(context.args)
     try:
-        data = api.check_redeem(keys)
+        data = await api.a_check_redeem(keys)
     except api.ProviderError as e:
         await update.message.reply_text(f"❌ {e}")
         return
@@ -76,7 +76,7 @@ async def admincid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     iid = " ".join(context.args)
     try:
-        data = api.get_cid(iid)
+        data = await api.a_get_cid(iid)
     except api.ProviderError as e:
         await update.message.reply_text(f"❌ {e}")
         return
@@ -87,7 +87,7 @@ async def refresh_products_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
     if not await _guard(update):
         return
     try:
-        data = api.key_products()
+        data = await api.a_key_products()
     except api.ProviderError as e:
         await update.message.reply_text(f"❌ {e}")
         return
@@ -308,17 +308,27 @@ async def buy_stock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("La cantidad debe ser un número entero.")
         return
+    if qty <= 0:
+        await update.message.reply_text("La cantidad debe ser mayor a 0.")
+        return
+
     order_id = api.make_order_id()
+    db.create_order(order_id, None, code, qty, 0.0)
+    await update.message.reply_text(f"⏳ Comprando al proveedor... (orden {order_id})")
     try:
-        data = api.buy_key(code, qty, order_id)
+        data = await api.a_buy_key(code, qty, order_id)
     except api.ProviderError as e:
+        db.update_order(order_id, db.ORDEN_PENDIENTE, error=str(e), charged=False)
         await update.message.reply_text(
-            f"❌ {e}\nOrden: {order_id} — si el proveedor la sigue procesando, puedes "
-            f"consultarla después llamando a buy-key/order con este mismo orderId."
+            f"❌ {e}\nOrden: {order_id} — el proveedor pudo haberla surtido de todos "
+            f"modos. Revísala con /orden {order_id}"
         )
         return
+
+    keys = data.get("data") or data.get("keys")
+    db.update_order(order_id, db.ORDEN_COMPLETADA, keys=keys, charged=False)
     await update.message.reply_text(
-        f"✅ Compra al proveedor completada.\nOrden: {order_id}\n\n{data.get('data') or data.get('keys')}"
+        f"✅ Compra al proveedor completada.\nOrden: {order_id}\n\n{keys}"
     )
 
 
@@ -495,3 +505,85 @@ async def max_cantidad_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     db.set_setting("max_qty", n)
     await update.message.reply_text(f"Máximo por compra → {n} unidades")
+
+
+# --------------------------------------------------------------------------
+# Órdenes al proveedor
+# --------------------------------------------------------------------------
+
+def _resumen_orden(o) -> str:
+    quien = f"cliente {o['telegram_id']}" if o["telegram_id"] else "stock propio"
+    marca = {
+        db.ORDEN_PENDIENTE: "⏳",
+        db.ORDEN_COMPLETADA: "✅",
+        db.ORDEN_FALLIDA: "❌",
+    }.get(o["status"], "•")
+    linea = f"{marca} {o['order_id']} — {o['code']} x{o['qty']} — {quien} — {o['created_at'][:19]}"
+    if o["status"] == db.ORDEN_PENDIENTE and o["error"]:
+        linea += f"\n    error: {o['error'][:120]}"
+    return linea
+
+
+async def ordenes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Órdenes que quedaron sin confirmar (o las últimas, con /ordenes todas)."""
+    if not await _guard(update):
+        return
+
+    todas = bool(context.args) and context.args[0].lower() in ("todas", "all")
+    rows = db.list_orders(status=None if todas else db.ORDEN_PENDIENTE, limit=30)
+
+    if not rows:
+        await update.message.reply_text(
+            "No hay órdenes sin confirmar. ✅" if not todas else "No hay órdenes registradas."
+        )
+        return
+
+    lines = [_resumen_orden(o) for o in rows]
+    lines.append("\nPara consultarla con el proveedor: /orden ORDER_ID")
+    await reply_long(update, lines, header="Órdenes" if todas else "Órdenes sin confirmar")
+
+
+async def orden_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Consulta con el proveedor qué pasó con una orden y actualiza su estado."""
+    if not await _guard(update):
+        return
+    if not context.args:
+        await update.message.reply_text("Uso: /orden ORDER_ID  (usa /ordenes para ver las pendientes)")
+        return
+
+    order_id = context.args[0]
+    local = db.get_order(order_id)
+
+    await update.message.reply_text("⏳ Consultando la orden con el proveedor...")
+    try:
+        data = await api.a_buy_key_order_status(order_id)
+    except api.ProviderError as e:
+        aviso = f"❌ El proveedor no pudo darme el estado: {e}"
+        if local:
+            aviso += f"\n\nLo que tengo guardado:\n{_resumen_orden(local)}"
+        await update.message.reply_text(aviso)
+        return
+
+    keys = data.get("keys") or data.get("data")
+    lines = [f"Orden {order_id}", f"Respuesta del proveedor: {keys}"]
+
+    if local:
+        lines.append("")
+        lines.append(_resumen_orden(local))
+        if local["status"] == db.ORDEN_PENDIENTE and keys:
+            # El proveedor si la surtio: se marca como completada. El cobro al
+            # cliente no se hace automatico a proposito — decides tu, porque
+            # ya le dijimos que no se le habia cobrado.
+            db.update_order(order_id, db.ORDEN_COMPLETADA, keys=keys)
+            lines.append("")
+            lines.append("✅ Marcada como completada.")
+            if local["telegram_id"] and not local["charged"]:
+                lines.append(
+                    f"⚠️ A este cliente NO se le cobró (se le avisó que la compra había fallado).\n"
+                    f"Si le vas a pasar las claves, cóbraselo con:\n"
+                    f"/cobrar {local['telegram_id']} {local['total']:.2f} orden {order_id}"
+                )
+    else:
+        lines.append("\n(No tengo esa orden registrada localmente.)")
+
+    await reply_long(update, lines)

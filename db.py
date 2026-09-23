@@ -10,6 +10,11 @@ PENDIENTE = "pendiente"
 APROBADO = "aprobado"
 BLOQUEADO = "bloqueado"
 
+# Estados de una orden de compra al proveedor.
+ORDEN_PENDIENTE = "pendiente"    # se mando, todavia no se confirma que llegaron las claves
+ORDEN_COMPLETADA = "completada"  # el proveedor devolvio las claves y se le cobro al cliente
+ORDEN_FALLIDA = "fallida"        # confirmado que no se surtio; no se cobro nada
+
 # Valores por defecto de los ajustes globales, usados cuando el admin todavia
 # no los configuro. Son conservadores a proposito: mas vale que el bot diga
 # "no" de mas y el admin lo suba, a que alguien compre de mas a tu costo.
@@ -66,7 +71,21 @@ def init_db():
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+            CREATE TABLE IF NOT EXISTS orders (
+                order_id TEXT PRIMARY KEY,
+                telegram_id INTEGER,
+                code TEXT,
+                qty INTEGER,
+                total REAL,
+                status TEXT,
+                keys TEXT,
+                error TEXT,
+                charged INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT,
+                updated_at TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_tx_customer ON transactions (telegram_id, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_orders_status ON orders (status, created_at DESC);
             """
         )
         _migrate(conn)
@@ -227,6 +246,59 @@ def list_products():
 def get_product(code: str):
     with get_conn() as conn:
         return conn.execute("SELECT * FROM products WHERE code=?", (code,)).fetchone()
+
+
+# --------------------------------------------------------------------------
+# Ordenes al proveedor
+# --------------------------------------------------------------------------
+
+def create_order(order_id: str, telegram_id, code: str, qty: int, total: float):
+    """Deja registrada la orden ANTES de llamar al proveedor.
+
+    Si la llamada se cuelga o el bot se reinicia a media compra, la orden
+    queda guardada y se puede consultar despues con su orderId, en vez de
+    vivir unicamente en un mensaje de chat.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO orders (order_id, telegram_id, code, qty, total, status, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (order_id, telegram_id, code, qty, total, ORDEN_PENDIENTE, _now(), _now()),
+        )
+
+
+def update_order(order_id: str, status: str, keys=None, error: str = None, charged: bool = None):
+    sets = ["status=?", "updated_at=?"]
+    vals = [status, _now()]
+    if keys is not None:
+        sets.append("keys=?")
+        vals.append(json.dumps(keys, ensure_ascii=False, default=str))
+    if error is not None:
+        sets.append("error=?")
+        vals.append(error)
+    if charged is not None:
+        sets.append("charged=?")
+        vals.append(1 if charged else 0)
+    vals.append(order_id)
+    with get_conn() as conn:
+        conn.execute(f"UPDATE orders SET {', '.join(sets)} WHERE order_id=?", vals)
+
+
+def get_order(order_id: str):
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM orders WHERE order_id=?", (order_id,)).fetchone()
+
+
+def list_orders(status: str = None, limit: int = 20):
+    with get_conn() as conn:
+        if status:
+            return conn.execute(
+                "SELECT * FROM orders WHERE status=? ORDER BY created_at DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        return conn.execute(
+            "SELECT * FROM orders ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
 
 
 # --------------------------------------------------------------------------

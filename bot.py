@@ -81,6 +81,10 @@ def main():
     app.add_handler(CommandHandler("limiteglobal", admin.limite_global_cmd))
     app.add_handler(CommandHandler("maxcantidad", admin.max_cantidad_cmd))
 
+    # Ordenes al proveedor
+    app.add_handler(CommandHandler("ordenes", admin.ordenes_cmd))
+    app.add_handler(CommandHandler("orden", admin.orden_cmd))
+
     # Botones inline (confirmar/cancelar compra)
     app.add_handler(CallbackQueryHandler(customer.buy_confirm_callback, pattern=r"^buy:"))
 
